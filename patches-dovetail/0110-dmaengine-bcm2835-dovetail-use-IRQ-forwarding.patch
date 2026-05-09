@@ -1,0 +1,67 @@
+From 51e7fe225de2bf005cbab50c25e33f01bc502002 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 19 Oct 2023 09:06:36 +0200
+Subject: [PATCH 110/171] dmaengine: bcm2835: dovetail: use IRQ forwarding
+
+Using irq_post_inband() in order to schedule a second callback of the
+interrupt handler from the in-band stage proved to be broken, causing
+double acknowledge of the interrupt event, which would yield IRQ loss
+eventually.
+
+Use inter-stage IRQ forwarding now available from the pipeline core
+instead.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ drivers/dma/bcm2835-dma.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/dma/bcm2835-dma.c b/drivers/dma/bcm2835-dma.c
+index ef1e88857a1a..f9387a1d2130 100644
+--- a/drivers/dma/bcm2835-dma.c
++++ b/drivers/dma/bcm2835-dma.c
+@@ -497,6 +497,7 @@ static inline bool is_base_irq_handler(void)
+ 
+ static irqreturn_t bcm2835_dma_callback(int irq, void *data)
+ {
++	irqreturn_t ret = IRQ_HANDLED;
+ 	struct bcm2835_chan *c = data;
+ 	struct bcm2835_desc *d;
+ 	unsigned long flags;
+@@ -510,8 +511,12 @@ static irqreturn_t bcm2835_dma_callback(int irq, void *data)
+ 			return IRQ_NONE;
+ 	}
+ 
+-	/* CAUTION: If running in-band, hard irqs are on. */
+-	vchan_lock_irqsave(&c->vc, flags);
++	/*
++	 * Hybrid locking of oob-enabled vchans ensures that hard IRQ
++	 * are disabled across the locked section, including from the
++	 * in-band stage.
++	 */
++	vchan_lock(&c->vc);
+ 
+ 	/*
+ 	 * Clear the INT flag to receive further interrupts. Keep the channel
+@@ -534,15 +539,14 @@ static irqreturn_t bcm2835_dma_callback(int irq, void *data)
+ 		 * stage, schedule a callback from in-band context.
+ 		 */
+ 		if (!do_channel(c, d))
+-			irq_post_inband(irq);
++			ret = IRQ_FORWARD;
+ 	} else {
+ 		do_channel(c, d);
+ 	}
+-
+ out:
+-	vchan_unlock_irqrestore(&c->vc, flags);
++	vchan_unlock(&c->vc);
+ 
+-	return IRQ_HANDLED;
++	return ret;
+ }
+ 
+ static int bcm2835_dma_alloc_chan_resources(struct dma_chan *chan)
+-- 
+2.43.0
+

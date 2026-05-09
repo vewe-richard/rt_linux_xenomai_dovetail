@@ -1,0 +1,169 @@
+From 0bda78678e0610253c216596c0705ab8274714c0 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 5 Nov 2023 16:40:05 +0100
+Subject: [PATCH 116/171] genirq: irq_pipeline: fix state irq tracing for
+ local_irq_*_full()
+
+local_irq_{save, restore}_full() must follow the ftrace requirements
+when called from the in-band context. Make sure to track the irq state
+accordingly.
+
+This fixes kernel splats when PROVE_LOCKING is on.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/asm-generic/irq_pipeline.h | 35 +++++++++++++++++++++++++++
+ include/linux/irqflags.h           | 20 ++++++++++++----
+ include/linux/irqstage.h           | 38 ------------------------------
+ 3 files changed, 51 insertions(+), 42 deletions(-)
+
+diff --git a/include/asm-generic/irq_pipeline.h b/include/asm-generic/irq_pipeline.h
+index 0f81ed0e73e9..4b8999678d53 100644
+--- a/include/asm-generic/irq_pipeline.h
++++ b/include/asm-generic/irq_pipeline.h
+@@ -54,6 +54,21 @@ void irq_pipeline_nmi_exit(void);
+ 
+ #define hard_local_irq_sync()			native_irq_sync()
+ 
++bool stage_disabled(void);
++
++bool stage_disabled_flags(unsigned long irqstate, bool *stalled);
++
++unsigned long test_and_lock_stage(int *irqsoff);
++
++void unlock_stage(unsigned long irqstate);
++
++#define stage_save_flags(__irqstate)					\
++  	do {								\
++	  unsigned long __flags = hard_local_save_flags();		\
++	  (__irqstate) = irqs_merge_flags(__flags,			\
++					  irqs_disabled());		\
++	} while (0)
++
+ #else /* !CONFIG_IRQ_PIPELINE */
+ 
+ #define hard_local_save_flags()			({ unsigned long __flags; \
+@@ -77,6 +92,26 @@ static inline void irq_pipeline_nmi_exit(void) { }
+ 
+ #define hard_local_irq_sync()			do { } while (0)
+ 
++#define stage_disabled()			irqs_disabled()
++
++#define stage_disabled_flags(__flags, __stalled)		\
++	({							\
++		(*__stalled) = irqs_disabled_flags(__flags);	\
++		(*__stalled);					\
++	})
++
++#define test_and_lock_stage(__irqsoff)				\
++	({							\
++		unsigned long __flags;				\
++		raw_local_irq_save(__flags);			\
++		*(__irqsoff) = irqs_disabled_flags(__flags);	\
++		__flags;					\
++	})
++
++#define unlock_stage(__flags)		raw_local_irq_restore(__flags)
++
++#define stage_save_flags(__flags)	raw_local_save_flags(__flags)
++
+ #endif /* !CONFIG_IRQ_PIPELINE */
+ 
+ #ifdef CONFIG_DEBUG_IRQ_PIPELINE
+diff --git a/include/linux/irqflags.h b/include/linux/irqflags.h
+index 39d5a8c25504..6646d151169f 100644
+--- a/include/linux/irqflags.h
++++ b/include/linux/irqflags.h
+@@ -266,12 +266,24 @@ extern void warn_bogus_irq_restore(void);
+ 		local_irq_disable();		\
+ 	} while (0)
+ 
+-#define local_irq_save_full(__flags)			\
+-	do {						\
+-		(__flags) = test_and_lock_stage(NULL);	\
++#define local_irq_save_full(__flags)					\
++	do {								\
++		bool __was_unstalled = running_inband() && !raw_irqs_disabled(); \
++		(__flags) = test_and_lock_stage(NULL);			\
++		if (__was_unstalled)					\
++			trace_hardirqs_off();				\
+ 	} while (0)
+ 
+-#define local_irq_restore_full(__flags)	unlock_stage(__flags)
++#define local_irq_restore_full(__flags)					\
++	do {								\
++		if (running_inband()) {					\
++			bool __stalled;					\
++			stage_disabled_flags(__flags, &__stalled);	\
++			if (!__stalled)					\
++				trace_hardirqs_on();			\
++		}							\
++		unlock_stage(__flags);					\
++	} while (0)
+ 
+ #else
+ #define local_irq_enable_full()		local_irq_enable()
+diff --git a/include/linux/irqstage.h b/include/linux/irqstage.h
+index 5fb6b7037aed..84773e6ebd38 100644
+--- a/include/linux/irqstage.h
++++ b/include/linux/irqstage.h
+@@ -316,21 +316,6 @@ static __always_inline void oob_irq_restore(unsigned long x)
+ 		__oob_irq_restore(x);
+ }
+ 
+-bool stage_disabled(void);
+-
+-bool stage_disabled_flags(unsigned long irqstate, bool *stalled);
+-
+-unsigned long test_and_lock_stage(int *irqsoff);
+-
+-void unlock_stage(unsigned long irqstate);
+-
+-#define stage_save_flags(__irqstate)					\
+-  	do {								\
+-	  unsigned long __flags = hard_local_save_flags();		\
+-	  (__irqstate) = irqs_merge_flags(__flags,			\
+-					  irqs_disabled());		\
+-	} while (0)
+-
+ int enable_oob_stage(const char *name);
+ 
+ int arch_enable_oob_stage(void);
+@@ -362,34 +347,11 @@ static __always_inline bool oob_stage_present(void)
+ 	return false;
+ }
+ 
+-static __always_inline bool stage_disabled(void)
+-{
+-	return irqs_disabled();
+-}
+-
+-static __always_inline bool stage_disabled_flags(unsigned long flags, bool *stalled)
+-{
+-	*stalled = irqs_disabled_flags(flags);
+-	return *stalled;
+-}
+-
+ static __always_inline void irq_post_inband(unsigned int irq)
+ {
+ 	call_is_nop_without_pipelining();
+ }
+ 
+-#define test_and_lock_stage(__irqsoff)				\
+-	({							\
+-		unsigned long __flags;				\
+-		raw_local_irq_save(__flags);			\
+-		*(__irqsoff) = irqs_disabled_flags(__flags);	\
+-		__flags;					\
+-	})
+-
+-#define unlock_stage(__flags)		raw_local_irq_restore(__flags)
+-
+-#define stage_save_flags(__flags)	raw_local_save_flags(__flags)
+-
+ static __always_inline void stall_inband_nocheck(void)
+ { }
+ 
+-- 
+2.43.0
+

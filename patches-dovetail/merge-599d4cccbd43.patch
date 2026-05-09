@@ -1,0 +1,126 @@
+599d4cccbd43b7c934819e9052c5f9dc3fb44f26
+diff --cc arch/x86/kernel/apic/vector.c
+index 059d01eab0e7,218ef9072c0c..659b7911387a
+--- a/arch/x86/kernel/apic/vector.c
++++ b/arch/x86/kernel/apic/vector.c
+@@@ -1140,12 -1014,32 +1140,13 @@@ static void __vector_schedule_cleanup(s
+  	apicd->move_in_progress = 0;
+  	if (cpu_online(cpu)) {
+  		struct vector_cleanup *cl = per_cpu_ptr(&vector_cleanup, cpu);
+ -
+  		hlist_add_head(&apicd->clist, &cl->head);
+ -
+ -		/*
+ -		 * The lockless timer_pending() check is safe here. If it
+ -		 * returns true, then the callback will observe this new
+ -		 * apic data in the hlist as everything is serialized by
+ -		 * vector lock.
+ -		 *
+ -		 * If it returns false then the timer is either not armed
+ -		 * or the other CPU executes the callback, which again
+ -		 * would be blocked on vector lock. Rearming it in the
+ -		 * latter case makes it fire for nothing.
+ -		 *
+ -		 * This is also safe against the callback rearming the timer
+ -		 * because that's serialized via vector lock too.
+ -		 */
+ -		if (!timer_pending(&cl->timer)) {
+ -			cl->timer.expires = jiffies + 1;
+ -			add_timer_on(&cl->timer, cpu);
+ -		}
+ +		queue_cleanup_work(cl, cpu);
+  	} else {
+- 		apicd->prev_vector = 0;
++ 		pr_warn("IRQ %u schedule cleanup for offline CPU %u\n", apicd->irq, cpu);
++ 		free_moved_vector(apicd);
+  	}
+ -	raw_spin_unlock(&vector_lock);
+ +	raw_spin_unlock_irqrestore(&vector_lock, flags);
+  }
+  
+  void vector_schedule_cleanup(struct irq_cfg *cfg)
+diff --cc drivers/tty/serial/imx.c
+index c2720ea283c4,285e0e1144c4..b48082e35fb4
+--- a/drivers/tty/serial/imx.c
++++ b/drivers/tty/serial/imx.c
+@@@ -1986,11 -2007,24 +2007,11 @@@ static void imx_uart_console_putchar(st
+  	imx_uart_writel(sport, ch, URTX0);
+  }
+  
+ -/*
+ - * Interrupts are disabled on entering
+ - */
+  static void
+ -imx_uart_console_write(struct console *co, const char *s, unsigned int count)
+ +__imx_uart_console_write(struct imx_port *sport, const char *s, unsigned int count)
+  {
+ -	struct imx_port *sport = imx_uart_ports[co->index];
+  	struct imx_port_ucrs old_ucr;
+- 	unsigned int ucr1;
+ -	unsigned long flags;
++ 	unsigned int ucr1, usr2;
+ -	int locked = 1;
+ -
+ -	if (sport->port.sysrq)
+ -		locked = 0;
+ -	else if (oops_in_progress)
+ -		locked = spin_trylock_irqsave(&sport->port.lock, flags);
+ -	else
+ -		spin_lock_irqsave(&sport->port.lock, flags);
+  
+  	/*
+  	 *	First, save UCR1/2/3 and then disable interrupts
+@@@ -2013,29 -2047,9 +2034,29 @@@
+  	 *	Finally, wait for transmitter to become empty
+  	 *	and restore UCR1/2/3
+  	 */
+- 	while (!(imx_uart_readl(sport, USR2) & USR2_TXDC));
+- 
++ 	read_poll_timeout_atomic(imx_uart_readl, usr2, usr2 & USR2_TXDC,
++ 				 0, USEC_PER_SEC, false, sport, USR2);
+  	imx_uart_ucrs_restore(sport, &old_ucr);
+ +}
+ +
+ +/*
+ + * Interrupts are disabled on entering
+ + */
+ +static void
+ +imx_uart_console_write(struct console *co, const char *s, unsigned int count)
+ +{
+ +	struct imx_port *sport = imx_uart_ports[co->index];
+ +	unsigned long flags;
+ +	int locked = 1;
+ +
+ +	if (sport->port.sysrq)
+ +		locked = 0;
+ +	else if (oops_in_progress)
+ +		locked = spin_trylock_irqsave(&sport->port.lock, flags);
+ +	else
+ +		spin_lock_irqsave(&sport->port.lock, flags);
+ +
+ +	__imx_uart_console_write(sport, s, count);
+  
+  	if (locked)
+  		spin_unlock_irqrestore(&sport->port.lock, flags);
+diff --cc kernel/printk/printk.c
+index 50dcf96a6489,0fca282c0a25..c601298fd2d1
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@@ -2304,16 -2309,9 +2310,15 @@@ asmlinkage int vprintk_emit(int facilit
+  	if (unlikely(suppress_printk))
+  		return 0;
+  
+- 	if (unlikely(suppress_panic_printk) &&
+- 	    atomic_read(&panic_cpu) != raw_smp_processor_id())
++ 	if (unlikely(suppress_panic_printk) && other_cpu_in_panic())
+  		return 0;
+  
+ +	if (unlikely(!printk_stage_safe())) {
+ +		printed_len = vprintk_store(facility, level, dev_info, fmt, args);
+ +		defer_console_output();
+ +		return printed_len;
+ +	}
+ +
+  	if (level == LOGLEVEL_SCHED) {
+  		level = LOGLEVEL_DEFAULT;
+  		in_sched = true;

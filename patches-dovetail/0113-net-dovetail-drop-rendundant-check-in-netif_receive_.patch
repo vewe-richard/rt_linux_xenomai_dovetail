@@ -1,0 +1,41 @@
+From 188136be6eaed91865c9a74d97a316780f9ec597 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Fri, 20 Oct 2023 15:37:47 +0200
+Subject: [PATCH 113/171] net: dovetail: drop rendundant check in
+ netif_receive_oob_list()
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ net/core/dev.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+index b58aaab324db..322f267e3447 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -5088,9 +5088,6 @@ static bool netif_receive_oob_list(struct list_head *head)
+ 	struct sk_buff *skb, *next;
+ 	struct net_device *dev;
+ 
+-	if (list_empty(head))
+-		return false;
+-
+ 	dev = list_first_entry(head, struct sk_buff, list)->dev;
+ 	if (!dev || !netif_oob_diversion(dev))
+ 		return false;
+@@ -5913,10 +5910,10 @@ void netif_receive_skb_list(struct list_head *head)
+ {
+ 	struct sk_buff *skb;
+ 
+-	if (netif_receive_oob_list(head))
+-		return;
+ 	if (list_empty(head))
+ 		return;
++	if (netif_receive_oob_list(head))
++		return;
+ 	if (trace_netif_receive_skb_list_entry_enabled()) {
+ 		list_for_each_entry(skb, head, list)
+ 			trace_netif_receive_skb_list_entry(skb);
+-- 
+2.43.0
+

@@ -1,0 +1,52 @@
+From df0df5971d4014b32b74d67e5614bb04617423fd Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Fri, 2 Feb 2024 15:10:19 +0100
+Subject: [PATCH 138/171] net: dovetail: rename sock_oob_detach() to
+ sock_oob_destroy()
+
+This call is about dismantling a network socket, freeing all its
+resources. This is the second part of a two-step deletion process
+which may happen asynchronously due to refcounting, paired with the
+release of the encapsulating kernel socket.
+
+Rename sock_oob_detach() to sock_oob_destroy() since this is not a
+strict converse of sock_oob_attach().
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/net/sock.h | 4 ++--
+ net/socket.c       | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/include/net/sock.h b/include/net/sock.h
+index e8638df59be3..72904d96bf10 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1877,9 +1877,9 @@ void sock_pfree(struct sk_buff *skb);
+ #ifdef CONFIG_NET_OOB
+ static inline void sock_oob_destruct(struct sock *sk)
+ {
+-	void sock_oob_detach(struct sock *sk);
++	void sock_oob_destroy(struct sock *sk);
+ 	if (sk->oob_data)
+-		sock_oob_detach(sk);
++		sock_oob_destroy(sk);
+ }
+ #else
+ static inline void sock_oob_destruct(struct sock *sk) { }
+diff --git a/net/socket.c b/net/socket.c
+index 181bfada0cbd..04632f2e07a0 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -158,7 +158,7 @@ int __weak sock_oob_attach(struct socket *sock)
+ 	return 0;
+ }
+ 
+-void __weak sock_oob_detach(struct sock *sk)
++void __weak sock_oob_destroy(struct sock *sk)
+ {
+ }
+ 
+-- 
+2.43.0
+

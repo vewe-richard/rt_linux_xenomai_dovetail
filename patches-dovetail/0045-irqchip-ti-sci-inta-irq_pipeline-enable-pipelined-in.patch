@@ -1,0 +1,39 @@
+From 673146e9b98da7297e115f879309c703f28ed8d1 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 12 Aug 2022 18:57:41 +0200
+Subject: [PATCH 045/171] irqchip/ti-sci-inta: irq_pipeline: enable pipelined
+ interrupt control
+
+The only actual change is to switch the parent irq for the aggregator
+to oob mode, so this can be propagated to the chained irqs if need be
+(i.e. IRQF_OOB for them). If a chained irq is not requested by the oob
+stage, the oob mode on the parent simply yields no effect.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/irqchip/irq-ti-sci-inta.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/irqchip/irq-ti-sci-inta.c b/drivers/irqchip/irq-ti-sci-inta.c
+index b83f5cbab123..24d3ff9055ab 100644
+--- a/drivers/irqchip/irq-ti-sci-inta.c
++++ b/drivers/irqchip/irq-ti-sci-inta.c
+@@ -259,6 +259,7 @@ static struct ti_sci_inta_vint_desc *ti_sci_inta_alloc_parent_irq(struct irq_dom
+ 	list_add_tail(&vint_desc->list, &inta->vint_list);
+ 	irq_set_chained_handler_and_data(vint_desc->parent_virq,
+ 					 ti_sci_inta_irq_handler, vint_desc);
++	irq_switch_oob(vint_desc->parent_virq, true);
+ 
+ 	return vint_desc;
+ free_vint_desc:
+@@ -540,6 +541,7 @@ static struct irq_chip ti_sci_inta_irq_chip = {
+ 	.irq_set_affinity	= ti_sci_inta_set_affinity,
+ 	.irq_request_resources	= ti_sci_inta_request_resources,
+ 	.irq_release_resources	= ti_sci_inta_release_resources,
++	.flags			= IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ /**
+-- 
+2.43.0
+

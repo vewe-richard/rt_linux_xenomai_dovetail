@@ -1,0 +1,32 @@
+From 9081f5b3d5b8a7c3ae1f61d4a68c0cbe44d688c7 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 12 Sep 2024 16:00:31 +0200
+Subject: [PATCH 153/171] net: dovetail: deny expanding oob buffer heads
+
+Since oob buffer heads may be handled from the oob stage, we cannot
+dynamically expand their storage safely. Make sure pskb_expand_head()
+got the memo, denying requests from oob callers.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ net/core/skbuff.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index d6d59c170ed7..d8421e23eefc 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -2217,6 +2217,10 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
+ 
+ 	BUG_ON(skb_shared(skb));
+ 
++	/* skb_reserve() is your friend for out-of-band operations. */
++	if (skb_is_oob(skb))
++		return -ENOMEM;
++
+ 	skb_zcopy_downgrade_managed(skb);
+ 
+ 	if (skb_pfmemalloc(skb))
+-- 
+2.43.0
+

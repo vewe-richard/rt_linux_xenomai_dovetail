@@ -1,0 +1,38 @@
+From 09cb85f4da28e5faa738752114cdf314b7268e51 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 1 Aug 2024 09:51:07 +0200
+Subject: [PATCH 129/171] dovetail: use in_oob_syscall() to detect foreign
+ syscalls
+
+Fixes: x86: irq_pipeline: add IRQ pipeline core
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ kernel/entry/common.c | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/entry/common.c b/kernel/entry/common.c
+index e1ec8c567e72..7067dfef9fd9 100644
+--- a/kernel/entry/common.c
++++ b/kernel/entry/common.c
+@@ -328,14 +328,13 @@ static inline bool syscall_has_exit_work(struct pt_regs *regs,
+ {
+ 	/*
+ 	 * Dovetail: if this does not look like an in-band syscall, it
+-	 * has to belong to the companion core. Typically,
+-	 * __OOB_SYSCALL_BIT would be set in this value. Skip the
+-	 * work for those syscalls.
++	 * has to belong to the companion core.  Skip the work for
++	 * those syscalls.
+ 	 */
+ 	if (unlikely(work & SYSCALL_WORK_EXIT)) {
+ 		if (!irqs_pipelined())
+ 			return true;
+-		return syscall_get_nr(current, regs) < NR_syscalls;
++		return !in_oob_syscall(regs);
+ 	}
+ 
+ 	return false;
+-- 
+2.43.0
+

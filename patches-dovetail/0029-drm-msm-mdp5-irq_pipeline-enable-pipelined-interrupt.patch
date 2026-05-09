@@ -1,0 +1,34 @@
+From 8eb77effd87bf94a6c6a9c904c95e359263b5d58 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 25 Jul 2021 15:56:34 +0200
+Subject: [PATCH 029/171] drm/msm/mdp5: irq_pipeline: enable pipelined
+ interrupt control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/gpu/drm/msm/msm_mdss.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
+index 348c66b14683..35c7cb755e85 100644
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -137,6 +137,7 @@ static struct irq_chip msm_mdss_irq_chip = {
+ 	.name = "msm_mdss",
+ 	.irq_mask = msm_mdss_irq_mask,
+ 	.irq_unmask = msm_mdss_irq_unmask,
++	.flags = IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static struct lock_class_key msm_mdss_lock_key, msm_mdss_request_key;
+@@ -420,6 +421,7 @@ static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5
+ 
+ 	irq_set_chained_handler_and_data(irq, msm_mdss_irq,
+ 					 msm_mdss);
++	irq_switch_oob(irq, true);
+ 
+ 	pm_runtime_enable(&pdev->dev);
+ 
+-- 
+2.43.0
+

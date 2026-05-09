@@ -1,0 +1,26 @@
+From 5e99d6a1cde25c29e92f6fb189a4904aa7189366 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Wed, 22 May 2024 15:27:05 +0200
+Subject: [PATCH 122/171] irq_pipeline: idtentry: add missing placeholder when
+ IRQ_PIPELINE=n
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/include/asm/idtentry.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index d0736cb675e5..8cf7a82e587d 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -227,6 +227,7 @@ __visible __noreturn void __##func(struct pt_regs *regs)
+ #define DEFINE_IDTENTRY_IRQ_PIPELINED(func)			DEFINE_IDTENTRY_IRQ(func)
+ #define DEFINE_IDTENTRY_SYSVEC_PIPELINED(vector, func)		DEFINE_IDTENTRY_SYSVEC(func)
+ #define DEFINE_IDTENTRY_SYSVEC_SIMPLE_PIPELINED(vector, func)	DEFINE_IDTENTRY_SYSVEC_SIMPLE(func)
++#define DEFINE_IDTENTRY_SYSVEC_PIPELINED_NORETURN(vector, func)	DEFINE_IDTENTRY_SYSVEC(func)
+ 
+ /**
+  * DEFINE_IDTENTRY_IRQ - Emit code for device interrupt IDT entry points
+-- 
+2.43.0
+

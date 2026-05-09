@@ -1,0 +1,176 @@
+From c978d2f027686dbea8c21134d4782fd78f9079fc Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 5 Dec 2015 18:36:25 +0100
+Subject: [PATCH 001/171] printk: introduce raw console channel
+
+A raw output handler (.write_raw) is added to the console descriptor
+for writing (short) text output unmodified, without any logging,
+header or preparation whatsoever, usable from any interrupt stage.
+
+The dedicated raw_printk() variant formats the output message then
+passes it on to the handler with hard pipeline lock held, irqs off.
+
+This is a very basic debug channel for situations when resorting to
+the fairly complex printk() handling is not an option. Unlike early
+consoles, regular consoles can provide a raw output service past the
+boot sequence. Raw output handlers are typically provided by serial
+console devices.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/console.h |  1 +
+ include/linux/printk.h  | 11 +++++++
+ init/Kconfig            | 12 ++++++++
+ kernel/printk/printk.c  | 65 +++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 89 insertions(+)
+
+diff --git a/include/linux/console.h b/include/linux/console.h
+index 7de11c763eb3..a182e11ab569 100644
+--- a/include/linux/console.h
++++ b/include/linux/console.h
+@@ -191,6 +191,7 @@ enum cons_flags {
+ struct console {
+ 	char			name[16];
+ 	void			(*write)(struct console *co, const char *s, unsigned int count);
++	void			(*write_raw)(struct console *co, const char *, unsigned int count);
+ 	int			(*read)(struct console *co, char *s, unsigned int count);
+ 	struct tty_driver	*(*device)(struct console *co, int *index);
+ 	void			(*unblank)(void);
+diff --git a/include/linux/printk.h b/include/linux/printk.h
+index 8ef499ab3c1e..89dc6ccca878 100644
+--- a/include/linux/printk.h
++++ b/include/linux/printk.h
+@@ -140,6 +140,17 @@ void early_printk(const char *s, ...) { }
+ 
+ struct dev_printk_info;
+ 
++#ifdef CONFIG_RAW_PRINTK
++void raw_vprintk(const char *fmt, va_list ap);
++asmlinkage __printf(1, 2)
++void raw_printk(const char *fmt, ...);
++#else
++static inline __cold
++void raw_vprintk(const char *s, va_list ap) { }
++static inline __printf(1, 2) __cold
++void raw_printk(const char *s, ...) { }
++#endif
++
+ #ifdef CONFIG_PRINTK
+ asmlinkage __printf(4, 0)
+ int vprintk_emit(int facility, int level,
+diff --git a/init/Kconfig b/init/Kconfig
+index 6d35728b94b2..e6ef95103b61 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1542,6 +1542,18 @@ config PRINTK
+ 	  very difficult to diagnose system problems, saying N here is
+ 	  strongly discouraged.
+ 
++config RAW_PRINTK
++       bool "Enable support for raw printk"
++       default n
++       help
++         This option enables a printk variant called raw_printk() for
++         writing all output unmodified to a raw console channel
++         immediately, without any header or preparation whatsoever,
++         usable from any context.
++
++	 Unlike early_printk() console devices, raw_printk() devices
++         can live past the boot sequence.
++
+ config BUG
+ 	bool "BUG() support" if EXPERT
+ 	default y
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index 0b3af1529778..5368579ef848 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -2404,6 +2404,66 @@ static void set_user_specified(struct console_cmdline *c, bool user_specified)
+ 	console_set_on_cmdline = 1;
+ }
+ 
++#ifdef CONFIG_RAW_PRINTK
++static struct console *raw_console;
++static DEFINE_HARD_SPINLOCK(raw_console_lock);
++
++void raw_vprintk(const char *fmt, va_list ap)
++{
++	unsigned long flags;
++	char buf[256];
++	int n;
++
++	if (raw_console == NULL || console_suspended)
++		return;
++
++	n = vscnprintf(buf, sizeof(buf), fmt, ap);
++        touch_nmi_watchdog();
++	raw_spin_lock_irqsave(&raw_console_lock, flags);
++	if (raw_console)
++		raw_console->write_raw(raw_console, buf, n);
++	raw_spin_unlock_irqrestore(&raw_console_lock, flags);
++}
++EXPORT_SYMBOL(raw_vprintk);
++
++asmlinkage __visible void raw_printk(const char *fmt, ...)
++{
++	va_list ap;
++
++	va_start(ap, fmt);
++	raw_vprintk(fmt, ap);
++	va_end(ap);
++}
++EXPORT_SYMBOL(raw_printk);
++
++static inline void register_raw_console(struct console *newcon)
++{
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&raw_console_lock, flags);
++	if (newcon->write_raw)
++		raw_console = newcon;
++	raw_spin_unlock_irqrestore(&raw_console_lock, flags);
++}
++
++static inline void unregister_raw_console(struct console *oldcon)
++{
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&raw_console_lock, flags);
++	if (oldcon == raw_console)
++		raw_console = NULL;
++	raw_spin_unlock_irqrestore(&raw_console_lock, flags);
++}
++
++#else
++
++static inline void register_raw_console(struct console *newcon) { }
++
++static inline void unregister_raw_console(struct console *oldcon) { }
++
++#endif
++
+ static int __add_preferred_console(char *name, int idx, char *options,
+ 				   char *brl_options, bool user_specified)
+ {
+@@ -3474,6 +3534,9 @@ void register_console(struct console *newcon)
+ 	if (err || newcon->flags & CON_BRL)
+ 		goto unlock;
+ 
++	/* The latest raw console to register is current. */
++	register_raw_console(newcon);
++
+ 	/*
+ 	 * If we have a bootconsole, and are switching to a real console,
+ 	 * don't print everything out again, since when the boot console, and
+@@ -3546,6 +3609,8 @@ static int unregister_console_locked(struct console *console)
+ 
+ 	con_printk(KERN_INFO, console, "disabled\n");
+ 
++	unregister_raw_console(console);
++
+ 	res = _braille_unregister_console(console);
+ 	if (res < 0)
+ 		return res;
+-- 
+2.43.0
+

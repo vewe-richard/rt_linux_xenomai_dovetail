@@ -1,0 +1,257 @@
+From 70cc1cbed191bbcf6f4214337eb15ba7074c24c8 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 22 Jul 2018 16:45:45 +0200
+Subject: [PATCH 069/171] ARM: vDSO: export user-visible MMIO clocksources
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/include/asm/vdso/gettimeofday.h | 60 ++++++++++++++++++++++++
+ arch/arm/kernel/asm-offsets.c            |  1 +
+ arch/arm/kernel/vdso.c                   | 60 ++++++++++++++++++++----
+ arch/arm/vdso/datapage.S                 | 11 +++++
+ lib/vdso/Kconfig                         |  1 +
+ 5 files changed, 125 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm/include/asm/vdso/gettimeofday.h b/arch/arm/include/asm/vdso/gettimeofday.h
+index 2134cbd5469f..eadbcde3679e 100644
+--- a/arch/arm/include/asm/vdso/gettimeofday.h
++++ b/arch/arm/include/asm/vdso/gettimeofday.h
+@@ -142,6 +142,66 @@ static __always_inline const struct vdso_data *__arch_get_vdso_data(void)
+ 	return __get_datapage();
+ }
+ 
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++
++extern struct vdso_priv *__get_privpage(void);
++
++static __always_inline struct vdso_priv *__arch_get_vdso_priv(void)
++{
++	return __get_privpage();
++}
++
++static __always_inline long clock_open_device(const char *path, int mode)
++{
++	register u32 r0 asm("r0") = (u32)path;
++	register u32 r1 asm("r1") = (u32)mode;
++	register long ret asm ("r0");
++	register long nr asm("r7") = __NR_open;
++
++	asm volatile(
++		"	swi #0\n"
++		: "=r" (ret)
++		: "r"(r0), "r"(r1), "r"(nr)
++		: "memory");
++
++	return ret;
++}
++
++static __always_inline
++long clock_ioctl_device(int fd, unsigned int cmd, long arg)
++{
++	register u32 r0 asm("r0") = (u32)fd;
++	register u32 r1 asm("r1") = (u32)cmd;
++	register u32 r2 asm("r2") = (u32)arg;
++	register long ret asm ("r0");
++	register long nr asm("r7") = __NR_ioctl;
++
++ 	asm volatile(
++		"	swi #0\n"
++		: "=r" (ret)
++		: "r"(r0), "r"(r1), "r"(r2), "r"(nr)
++		: "memory");
++
++ 	return ret;
++}
++
++static __always_inline long clock_close_device(int fd)
++{
++	register u32 r0 asm("r0") = (u32)fd;
++	register long ret asm ("r0");
++	register long nr asm("r7") = __NR_close;
++
++	asm volatile(
++		"	swi #0\n"
++		: "=r" (ret)
++		: "r"(r0), "r"(nr)
++		: "memory");
++
++	return ret;
++}
++
++#endif	/* CONFIG_GENERIC_CLOCKSOURCE_VDSO */
++
+ #endif /* !__ASSEMBLY__ */
+ 
+ #endif /* __ASM_VDSO_GETTIMEOFDAY_H */
+diff --git a/arch/arm/kernel/asm-offsets.c b/arch/arm/kernel/asm-offsets.c
+index a2f28c268871..8308f9113bf7 100644
+--- a/arch/arm/kernel/asm-offsets.c
++++ b/arch/arm/kernel/asm-offsets.c
+@@ -154,6 +154,7 @@ int main(void)
+   BLANK();
+ #ifdef CONFIG_VDSO
+   DEFINE(VDSO_DATA_SIZE,	sizeof(union vdso_data_store));
++  DEFINE(VDSO_PRIV_SIZE,	PAGE_SIZE);
+ #endif
+   BLANK();
+ #ifdef CONFIG_ARM_MPU
+diff --git a/arch/arm/kernel/vdso.c b/arch/arm/kernel/vdso.c
+index f297d66a8a76..94a7f943cab3 100644
+--- a/arch/arm/kernel/vdso.c
++++ b/arch/arm/kernel/vdso.c
+@@ -32,7 +32,10 @@ static struct page **vdso_text_pagelist;
+ 
+ extern char vdso_start[], vdso_end[];
+ 
+-/* Total number of pages needed for the data and text portions of the VDSO. */
++/*
++ * Total number of pages needed for the data, private and text
++ * portions of the VDSO.
++ */
+ unsigned int vdso_total_pages __ro_after_init;
+ 
+ /*
+@@ -171,8 +174,10 @@ static void __init patch_vdso(void *ehdr)
+ 	/* If the virtual counter is absent or non-functional we don't
+ 	 * want programs to incur the slight additional overhead of
+ 	 * dispatching through the VDSO only to fall back to syscalls.
++	 * However, if clocksources supporting generic MMIO access can
++	 * be reached via the vDSO, keep this fast path enabled.
+ 	 */
+-	if (!cntvct_ok) {
++	if (!cntvct_ok && !IS_ENABLED(CONFIG_GENERIC_CLOCKSOURCE_VDSO)) {
+ 		vdso_nullpatch_one(&einfo, "__vdso_gettimeofday");
+ 		vdso_nullpatch_one(&einfo, "__vdso_clock_gettime");
+ 		vdso_nullpatch_one(&einfo, "__vdso_clock_gettime64");
+@@ -210,17 +215,28 @@ static int __init vdso_init(void)
+ 
+ 	vdso_text_mapping.pages = vdso_text_pagelist;
+ 
+-	vdso_total_pages = 1; /* for the data/vvar page */
++	vdso_total_pages = 2; /* for the data/vvar and vpriv pages */
+ 	vdso_total_pages += text_pages;
+ 
+ 	cntvct_ok = cntvct_functional();
+ 
+ 	patch_vdso(vdso_start);
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++	vdso_data->cs_type_seq = CLOCKSOURCE_VDSO_NONE << 16 | 1;
++#endif
+ 
+ 	return 0;
+ }
+ arch_initcall(vdso_init);
+ 
++static int install_vpriv(struct mm_struct *mm, unsigned long addr)
++{
++	/* Try mapping a page of anonymous memory at 'addr'. */
++	return mmap_region(NULL, addr, PAGE_SIZE,
++			  VM_READ | VM_WRITE | VM_MAYREAD | VM_MAYWRITE,
++			   0, NULL) != addr ? -EINVAL : 0;
++}
++
+ static int install_vvar(struct mm_struct *mm, unsigned long addr)
+ {
+ 	struct vm_area_struct *vma;
+@@ -228,8 +244,13 @@ static int install_vvar(struct mm_struct *mm, unsigned long addr)
+ 	vma = _install_special_mapping(mm, addr, PAGE_SIZE,
+ 				       VM_READ | VM_MAYREAD,
+ 				       &vdso_data_mapping);
++	if (IS_ERR(vma))
++		return PTR_ERR(vma);
++
++	if (cache_is_vivt())
++		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+ 
+-	return PTR_ERR_OR_ZERO(vma);
++	return vma->vm_start != addr ? -EINVAL : 0;
+ }
+ 
+ /* assumes mmap_lock is write-locked */
+@@ -243,18 +264,41 @@ void arm_install_vdso(struct mm_struct *mm, unsigned long addr)
+ 	if (vdso_text_pagelist == NULL)
+ 		return;
+ 
+-	if (install_vvar(mm, addr))
++	/*
++	 * Install the vDSO mappings we need:
++	 *
++	 * +----------------+
++	 * |     vpriv      |  PAGE_SIZE (private anon memory)
++	 * |----------------|
++	 * |     vvar       |  PAGE_SIZE (shared)
++	 * |----------------|
++	 * |     text       |  text_pages * PAGE_SIZE (shared)
++	 * |        ...     |
++	 * +----------------+
++	 */
++
++	if (install_vpriv(mm, addr)) {
++		pr_err("cannot map VPRIV at expected address!\n");
++		return;
++	}
++
++	addr += PAGE_SIZE;
++	if (install_vvar(mm, addr)) {
++		WARN(1, "cannot map VVAR at expected address!\n");
+ 		return;
++	}
+ 
+-	/* Account for vvar page. */
++	/* Account for vvar and vpriv pages. */
+ 	addr += PAGE_SIZE;
+-	len = (vdso_total_pages - 1) << PAGE_SHIFT;
++	len = (vdso_total_pages - 2) << PAGE_SHIFT;
+ 
+ 	vma = _install_special_mapping(mm, addr, len,
+ 		VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC,
+ 		&vdso_text_mapping);
+ 
+-	if (!IS_ERR(vma))
++	if (IS_ERR(vma) || vma->vm_start != addr)
++		WARN(1, "cannot map VDSO at expected address!\n");
++	else
+ 		mm->context.vdso = addr;
+ }
+ 
+diff --git a/arch/arm/vdso/datapage.S b/arch/arm/vdso/datapage.S
+index 9cd73b725d9f..9beb76db2ec3 100644
+--- a/arch/arm/vdso/datapage.S
++++ b/arch/arm/vdso/datapage.S
+@@ -5,6 +5,8 @@
+ 	.align 2
+ .L_vdso_data_ptr:
+ 	.long	_start - . - VDSO_DATA_SIZE
++.L_vdso_priv_ptr:
++	.long	_start - . - VDSO_DATA_SIZE - VDSO_PRIV_SIZE
+ 
+ ENTRY(__get_datapage)
+ 	.fnstart
+@@ -14,3 +16,12 @@ ENTRY(__get_datapage)
+ 	bx	lr
+ 	.fnend
+ ENDPROC(__get_datapage)
++
++ENTRY(__get_privpage)
++	.fnstart
++	adr	r0, .L_vdso_priv_ptr
++	ldr	r1, [r0]
++	add	r0, r0, r1
++	bx	lr
++	.fnend
++ENDPROC(__get_privpage)
+diff --git a/lib/vdso/Kconfig b/lib/vdso/Kconfig
+index a293f387ac98..6b46f6dd76a7 100644
+--- a/lib/vdso/Kconfig
++++ b/lib/vdso/Kconfig
+@@ -32,6 +32,7 @@ config GENERIC_VDSO_TIME_NS
+ 
+ config GENERIC_CLOCKSOURCE_VDSO
+         select CLKSRC_MMIO
++        depends on ARM
+ 	bool
+ 	help
+ 	   Enables access to clocksources via the vDSO based on
+-- 
+2.43.0
+

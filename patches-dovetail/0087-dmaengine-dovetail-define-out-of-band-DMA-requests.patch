@@ -1,0 +1,206 @@
+From b7fb3a3fe7722f1225e8667e84ba805b82053bf0 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Wed, 14 Aug 2019 16:05:14 +0200
+Subject: [PATCH 087/171] dmaengine: dovetail: define out-of-band DMA requests
+
+Controlling DMA transfers from the out-of-band stage makes it possible
+to implement closed-loop control systems running at high frequency,
+without involving any in-band operation.
+
+This commit implements the required bits in the generic dmaengine
+layer in order for DMA backends to advertise such capability.
+
+DMA_OOB should be set for a DMA backend which can handle out-of-band
+transfers, either via the slave or cyclic interface. The behavior of a
+transfer descriptor with respect to out-of-band operations can be
+controlled by the following flags passed to
+dmaengine_prep_dma_cyclic() and/or dmaengine_prep_slave_sg():
+
+- DMA_OOB_INTERRUPT causes the callback attached to the TX descriptor
+  to be invoked from the out-of-band stage upon transfer
+  completion. The transfer can be either of cyclic or slave type.
+
+- DMA_OOB_PULSE denotes a slave TX descriptor which should be
+  triggered manually by calling dma_pulse_oob() for the channel it is
+  issued on in order to actually start the transfer in the DMA
+  hardware, preventing dmaengine_async_issue_pending() from doing so
+  (the latter should still be called to select the transfer descriptor
+  though). Typically, a SPI master controller operated from the
+  out-of-band stage would use the pulsed mode in order to repeatedly
+  trigger the next out-of-band transfer at due time.
+
+The common pattern for preparing an out-of-band transfer driven by an
+I/O peripheral applies, e.g.:
+
+   desc = dmaengine_prep_dma_cyclic(chan, ..., DMA_OOB_INTERRUPT);
+   desc->callback = oob_callback;
+   desc->callback_param = callback_arg;
+   ...
+   dmaengine_submit(desc);
+   dma_async_issue_pending(chan);
+
+Alternatively, an out-of-band cyclic transfer driven by the host at
+arbitrary times should be prepared as follows:
+
+   desc = dmaengine_prep_slave_sg(chan, ..., DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
+   desc->callback = oob_callback;
+   desc->callback_param = callback_arg;
+   ...
+   dmaengine_submit(desc);
+   dma_async_issue_pending(chan);
+   ...
+   for (;;) {
+       ret = dma_pulse_oob(chan);
+   }
+
+Running an out-of-band transfer involves the following limitations:
+
+- no other descriptor can be issued on a channel until the ongoing
+  out-of-band transfer is terminated.
+
+- an out-of-band descriptor has no precedence over in-band ones until
+  it becomes active on the channel as a result of calling
+  dma_async_issue_pending().
+
+NOTE: With the exception of dma_pulse_oob() which can be used from any
+execution stage including out-of-band, the common dmaengine API must
+be called from in-band context as usual, including for descriptor prep
+and termination calls.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/dma/dmaengine.c   |  9 ++++++++-
+ include/linux/dmaengine.h | 41 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/dma/dmaengine.c b/drivers/dma/dmaengine.c
+index b7388ae62d7f..b1b65437ca0c 100644
+--- a/drivers/dma/dmaengine.c
++++ b/drivers/dma/dmaengine.c
+@@ -579,7 +579,8 @@ int dma_get_slave_caps(struct dma_chan *chan, struct dma_slave_caps *caps)
+ 
+ 	/* check if the channel supports slave transactions */
+ 	if (!(test_bit(DMA_SLAVE, device->cap_mask.bits) ||
+-	      test_bit(DMA_CYCLIC, device->cap_mask.bits)))
++	      test_bit(DMA_CYCLIC, device->cap_mask.bits) ||
++	      test_bit(DMA_OOB, device->cap_mask.bits)))
+ 		return -ENXIO;
+ 
+ 	/*
+@@ -1180,6 +1181,12 @@ int dma_async_device_register(struct dma_device *device)
+ 		return -EIO;
+ 	}
+ 
++	if (dma_has_cap(DMA_OOB, device->cap_mask) && !device->device_pulse_oob) {
++		dev_err(device->dev,
++			"Device claims capability DMA_OOB, but pulse handler is not defined\n");
++		return -EIO;
++	}
++
+ 	if (!device->device_release)
+ 		dev_dbg(device->dev,
+ 			 "WARN: Device release is not defined so it is not safe to unbind this driver while in use\n");
+diff --git a/include/linux/dmaengine.h b/include/linux/dmaengine.h
+index c3656e590213..21e7c4595c07 100644
+--- a/include/linux/dmaengine.h
++++ b/include/linux/dmaengine.h
+@@ -61,6 +61,7 @@ enum dma_transaction_type {
+ 	DMA_ASYNC_TX,
+ 	DMA_SLAVE,
+ 	DMA_CYCLIC,
++	DMA_OOB,
+ 	DMA_INTERLEAVE,
+ 	DMA_COMPLETION_NO_ORDER,
+ 	DMA_REPEAT,
+@@ -190,6 +191,13 @@ struct dma_interleaved_template {
+  *  transaction is marked with DMA_PREP_REPEAT will cause the new transaction
+  *  to never be processed and stay in the issued queue forever. The flag is
+  *  ignored if the previous transaction is not a repeated transaction.
++ * @DMA_OOB_INTERRUPT - if DMA_OOB is supported, handle the completion
++ *  interrupt for this transaction from the out-of-band stage (implies
++ *  DMA_PREP_INTERRUPT). This includes calling the completion callback routine
++ *  from such context if defined for the transaction.
++ * @DMA_OOB_PULSE - if DMA_OOB is supported, (slave) transactions on the
++ *  out-of-band channel should be triggered manually by a call to
++ *  dma_pulse_oob() (implies DMA_OOB_INTERRUPT).
+  */
+ enum dma_ctrl_flags {
+ 	DMA_PREP_INTERRUPT = (1 << 0),
+@@ -202,6 +210,8 @@ enum dma_ctrl_flags {
+ 	DMA_PREP_CMD = (1 << 7),
+ 	DMA_PREP_REPEAT = (1 << 8),
+ 	DMA_PREP_LOAD_EOT = (1 << 9),
++	DMA_OOB_INTERRUPT = (1 << 10),
++	DMA_OOB_PULSE = (1 << 11),
+ };
+ 
+ /**
+@@ -938,6 +948,7 @@ struct dma_device {
+ 					    dma_cookie_t cookie,
+ 					    struct dma_tx_state *txstate);
+ 	void (*device_issue_pending)(struct dma_chan *chan);
++	int (*device_pulse_oob)(struct dma_chan *chan);
+ 	void (*device_release)(struct dma_device *dev);
+ 	/* debugfs support */
+ 	void (*dbg_summary_show)(struct seq_file *s, struct dma_device *dev);
+@@ -974,6 +985,14 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_single(
+ 						  dir, flags, NULL);
+ }
+ 
++static inline bool dmaengine_oob_valid(struct dma_chan *chan,
++				unsigned long flags)
++{
++	return !(dovetailing() &&
++		flags & (DMA_OOB_INTERRUPT|DMA_OOB_PULSE) &&
++		!test_bit(DMA_OOB, chan->device->cap_mask.bits));
++}
++
+ static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_sg(
+ 	struct dma_chan *chan, struct scatterlist *sgl,	unsigned int sg_len,
+ 	enum dma_transfer_direction dir, unsigned long flags)
+@@ -981,6 +1000,9 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_sg(
+ 	if (!chan || !chan->device || !chan->device->device_prep_slave_sg)
+ 		return NULL;
+ 
++	if (!dmaengine_oob_valid(chan, flags))
++		return NULL;
++
+ 	return chan->device->device_prep_slave_sg(chan, sgl, sg_len,
+ 						  dir, flags, NULL);
+ }
+@@ -1008,6 +1030,9 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_cyclic(
+ 	if (!chan || !chan->device || !chan->device->device_prep_dma_cyclic)
+ 		return NULL;
+ 
++	if (!dmaengine_oob_valid(chan, flags))
++		return NULL;
++
+ 	return chan->device->device_prep_dma_cyclic(chan, buf_addr, buf_len,
+ 						period_len, dir, flags);
+ }
+@@ -1420,6 +1445,22 @@ static inline void dma_async_issue_pending(struct dma_chan *chan)
+ 	chan->device->device_issue_pending(chan);
+ }
+ 
++/**
++ * dma_pulse_oob - manual trigger of an out-of-band transaction
++ * @chan: target DMA channel
++ *
++ * Trigger the next out-of-band transaction immediately.
++ */
++static inline int dma_pulse_oob(struct dma_chan *chan)
++{
++	int ret = -ENOTSUPP;
++
++	if (chan->device->device_pulse_oob)
++		ret = chan->device->device_pulse_oob(chan);
++
++	return ret;
++}
++
+ /**
+  * dma_async_is_tx_complete - poll for transaction completion
+  * @chan: DMA channel
+-- 
+2.43.0
+

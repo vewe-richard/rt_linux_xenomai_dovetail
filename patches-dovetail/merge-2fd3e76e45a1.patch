@@ -1,0 +1,104 @@
+2fd3e76e45a17c2854ee2ac31e9924f33e7c5898
+diff --cc arch/x86/kernel/fpu/signal.c
+index 9a0c13892ecc,247f2225aa9f..62cf82be9860
+--- a/arch/x86/kernel/fpu/signal.c
++++ b/arch/x86/kernel/fpu/signal.c
+@@@ -277,15 -274,15 +277,16 @@@ static int __restore_fpregs_from_user(v
+   * Attempt to restore the FPU registers directly from user memory.
+   * Pagefaults are handled and any errors returned are fatal.
+   */
+- static bool restore_fpregs_from_user(void __user *buf, u64 xrestore,
+- 				     bool fx_only, unsigned int size)
++ static bool restore_fpregs_from_user(void __user *buf, u64 xrestore, bool fx_only)
+  {
+  	struct fpu *fpu = &current->thread.fpu;
+ +	unsigned long flags;
+  	int ret;
+  
++ 	/* Restore enabled features only. */
++ 	xrestore &= fpu->fpstate->user_xfeatures;
+  retry:
+ -	fpregs_lock();
+ +	flags = fpregs_lock();
+  	/* Ensure that XFD is up to date */
+  	xfd_update_state(fpu->fpstate);
+  	pagefault_disable();
+@@@ -343,9 -340,7 +344,8 @@@ static bool __fpu_restore_sig(void __us
+  	struct user_i387_ia32_struct env;
+  	bool success, fx_only = false;
+  	union fpregs_state *fpregs;
+- 	unsigned int state_size;
+  	u64 user_xfeatures = 0;
+ +	unsigned long flags;
+  
+  	if (use_xsave()) {
+  		struct _fpx_sw_bytes fx_sw_user;
+diff --cc arch/x86/mm/fault.c
+index 0f00fba6e4d8,a9d69ec994b7..0d5f79d9de77
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@@ -804,64 -798,6 +804,55 @@@ show_signal_msg(struct pt_regs *regs, u
+  	show_opcodes(regs, loglvl);
+  }
+  
+- /*
+-  * The (legacy) vsyscall page is the long page in the kernel portion
+-  * of the address space that has user-accessible permissions.
+-  */
+- static bool is_vsyscall_vaddr(unsigned long vaddr)
+- {
+- 	return unlikely((vaddr & PAGE_MASK) == VSYSCALL_ADDR);
+- }
+- 
+ +#ifdef CONFIG_IRQ_PIPELINE
+ +
+ +static inline void cond_reenable_irqs_user(void)
+ +{
+ +	hard_local_irq_enable();
+ +
+ +	if (running_inband())
+ +		local_irq_enable();
+ +}
+ +
+ +static inline void cond_reenable_irqs_kernel(irqentry_state_t state,
+ +					struct pt_regs *regs)
+ +{
+ +	if (regs->flags & X86_EFLAGS_IF) {
+ +		hard_local_irq_enable();
+ +		if (state.stage_info == IRQENTRY_INBAND_UNSTALLED)
+ +			local_irq_enable();
+ +	}
+ +}
+ +
+ +static inline void cond_disable_irqs(void)
+ +{
+ +	hard_local_irq_disable();
+ +
+ +	if (running_inband())
+ +		local_irq_disable();
+ +}
+ +
+ +#else  /* !CONFIG_IRQ_PIPELINE */
+ +
+ +static inline void cond_reenable_irqs_user(void)
+ +{
+ +	local_irq_enable();
+ +}
+ +
+ +static inline void cond_reenable_irqs_kernel(irqentry_state_t state,
+ +					struct pt_regs *regs)
+ +{
+ +	if (regs->flags & X86_EFLAGS_IF)
+ +		local_irq_enable();
+ +}
+ +
+ +static inline void cond_disable_irqs(void)
+ +{
+ +	local_irq_disable();
+ +}
+ +
+ +#endif  /* !CONFIG_IRQ_PIPELINE */
+ +
+  static void
+  __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
+  		       unsigned long address, u32 pkey, int si_code)

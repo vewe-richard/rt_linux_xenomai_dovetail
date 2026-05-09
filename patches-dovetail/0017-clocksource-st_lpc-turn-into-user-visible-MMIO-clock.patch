@@ -1,0 +1,41 @@
+From 013bda6b309223c70a4d82394cb58f1127e1a0d5 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Wed, 11 Jul 2018 09:27:33 +0200
+Subject: [PATCH 017/171] clocksource/st_lpc: turn into user-visible MMIO
+ clocksource
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/clocksource/Kconfig         | 2 +-
+ drivers/clocksource/clksrc_st_lpc.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clocksource/Kconfig b/drivers/clocksource/Kconfig
+index ce69bc0dd876..3dbd3d02c256 100644
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -620,7 +620,7 @@ config CLKSRC_ST_LPC
+ 	bool "Low power clocksource found in the LPC" if COMPILE_TEST
+ 	select TIMER_OF if OF
+ 	depends on HAS_IOMEM
+-	select CLKSRC_MMIO
++	imply GENERIC_CLOCKSOURCE_VDSO
+ 	help
+ 	  Enable this option to use the Low Power controller timer
+ 	  as clocksource.
+diff --git a/drivers/clocksource/clksrc_st_lpc.c b/drivers/clocksource/clksrc_st_lpc.c
+index 419a886876e4..b30b814d271f 100644
+--- a/drivers/clocksource/clksrc_st_lpc.c
++++ b/drivers/clocksource/clksrc_st_lpc.c
+@@ -51,7 +51,7 @@ static int __init st_clksrc_init(void)
+ 
+ 	sched_clock_register(st_clksrc_sched_clock_read, 32, rate);
+ 
+-	ret = clocksource_mmio_init(ddata.base + LPC_LPT_LSB_OFF,
++	ret = clocksource_user_single_mmio_init(ddata.base + LPC_LPT_LSB_OFF,
+ 				    "clksrc-st-lpc", rate, 300, 32,
+ 				    clocksource_mmio_readl_up);
+ 	if (ret) {
+-- 
+2.43.0
+

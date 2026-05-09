@@ -1,0 +1,260 @@
+c69c87b18ec40c393e598e517d9418b5e694de75
+diff --cc arch/x86/include/asm/idtentry.h
+index faeddb4a9db3,10603e185111..cb68f437b119
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@@ -484,14 -456,9 +521,15 @@@ __visible noinstr void func(struct pt_r
+  #define DECLARE_IDTENTRY_DEBUG		DECLARE_IDTENTRY_IST
+  #define DEFINE_IDTENTRY_DEBUG		DEFINE_IDTENTRY_IST
+  #define DEFINE_IDTENTRY_DEBUG_USER	DEFINE_IDTENTRY_NOIST
++ #define DEFINE_FREDENTRY_DEBUG		DEFINE_FREDENTRY_RAW
+  #endif
+  
+ +#define sysvec_install(vector, function)                       \
+ +	{                                                      \
+ +		pipeline_install_sysvec(vector, __##function); \
+ +		alloc_intr_gate(vector, asm_##function);       \
+ +	}
+ +
+  #else /* !__ASSEMBLY__ */
+  
+  /*
+@@@ -725,15 -689,15 +763,20 @@@ DECLARE_IDTENTRY_SYSVEC_PIPELINED(X86_P
+  #endif
+  
+  #ifdef CONFIG_SMP
+ -DECLARE_IDTENTRY(RESCHEDULE_VECTOR,			sysvec_reschedule_ipi);
+ -DECLARE_IDTENTRY_SYSVEC(REBOOT_VECTOR,			sysvec_reboot);
+ -DECLARE_IDTENTRY_SYSVEC(CALL_FUNCTION_SINGLE_VECTOR,	sysvec_call_function_single);
+ -DECLARE_IDTENTRY_SYSVEC(CALL_FUNCTION_VECTOR,		sysvec_call_function);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(RESCHEDULE_VECTOR,		sysvec_reschedule_ipi);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(REBOOT_VECTOR,		sysvec_reboot);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_SINGLE_VECTOR,	sysvec_call_function_single);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_VECTOR,		sysvec_call_function);
+ +#ifdef CONFIG_IRQ_PIPELINE
+ +DECLARE_IDTENTRY_SYSVEC(TIMER_OOB_VECTOR,		sysvec_timer_oob_ipi);
+ +DECLARE_IDTENTRY_SYSVEC(RESCHEDULE_OOB_VECTOR,		sysvec_reschedule_oob_ipi);
+ +DECLARE_IDTENTRY_SYSVEC(CALL_FUNCTION_OOB_VECTOR,       sysvec_call_function_oob_ipi);
+ +#endif
++ #else
++ # define fred_sysvec_reschedule_ipi			NULL
++ # define fred_sysvec_reboot				NULL
++ # define fred_sysvec_call_function_single		NULL
++ # define fred_sysvec_call_function			NULL
+  #endif
+  
+  #ifdef CONFIG_X86_LOCAL_APIC
+@@@ -750,14 -720,20 +799,20 @@@ DECLARE_IDTENTRY_SYSVEC(THERMAL_APIC_VE
+  # endif
+  
+  # ifdef CONFIG_IRQ_WORK
+ -DECLARE_IDTENTRY_SYSVEC(IRQ_WORK_VECTOR,		sysvec_irq_work);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(IRQ_WORK_VECTOR,	sysvec_irq_work);
++ # else
++ # define fred_sysvec_irq_work				NULL
+  # endif
+  #endif
+  
+  #ifdef CONFIG_HAVE_KVM
+ -DECLARE_IDTENTRY_SYSVEC(POSTED_INTR_VECTOR,		sysvec_kvm_posted_intr_ipi);
+ -DECLARE_IDTENTRY_SYSVEC(POSTED_INTR_WAKEUP_VECTOR,	sysvec_kvm_posted_intr_wakeup_ipi);
+ -DECLARE_IDTENTRY_SYSVEC(POSTED_INTR_NESTED_VECTOR,	sysvec_kvm_posted_intr_nested_ipi);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(POSTED_INTR_VECTOR,		sysvec_kvm_posted_intr_ipi);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(POSTED_INTR_WAKEUP_VECTOR,	sysvec_kvm_posted_intr_wakeup_ipi);
+ +DECLARE_IDTENTRY_SYSVEC_PIPELINED(POSTED_INTR_NESTED_VECTOR,	sysvec_kvm_posted_intr_nested_ipi);
++ #else
++ # define fred_sysvec_kvm_posted_intr_ipi		NULL
++ # define fred_sysvec_kvm_posted_intr_wakeup_ipi		NULL
++ # define fred_sysvec_kvm_posted_intr_nested_ipi		NULL
+  #endif
+  
+  #if IS_ENABLED(CONFIG_HYPERV)
+diff --cc arch/x86/kernel/apic/apic.c
+index 592c07b5bf9f,00ca9c3c1d8b..0b46273e9b0e
+--- a/arch/x86/kernel/apic/apic.c
++++ b/arch/x86/kernel/apic/apic.c
+@@@ -486,8 -473,19 +486,20 @@@ static int lapic_timer_shutdown(struct 
+  	v = apic_read(APIC_LVTT);
+  	v |= (APIC_LVT_MASKED | LOCAL_TIMER_VECTOR);
+  	apic_write(APIC_LVTT, v);
+- 	apic_write(APIC_TMICT, 0);
++ 
++ 	/*
++ 	 * Setting APIC_LVT_MASKED (above) should be enough to tell
++ 	 * the hardware that this timer will never fire. But AMD
++ 	 * erratum 411 and some Intel CPU behavior circa 2024 say
++ 	 * otherwise.  Time for belt and suspenders programming: mask
++ 	 * the timer _and_ zero the counter registers:
++ 	 */
++ 	if (v & APIC_LVT_TIMER_TSCDEADLINE)
++ 		wrmsrl(MSR_IA32_TSC_DEADLINE, 0);
++ 	else
++ 		apic_write(APIC_TMICT, 0);
++ 
+ +	hard_local_irq_restore(flags);
+  	return 0;
+  }
+  
+diff --cc arch/x86/kernel/fpu/signal.c
+index 62cf82be9860,2b3b9e140dd4..02467c88a743
+--- a/arch/x86/kernel/fpu/signal.c
++++ b/arch/x86/kernel/fpu/signal.c
+@@@ -231,9 -228,9 +231,9 @@@ retry
+  		fpregs_restore_userregs();
+  
+  	pagefault_disable();
+- 	ret = copy_fpregs_to_sigframe(buf_fx);
++ 	ret = copy_fpregs_to_sigframe(buf_fx, pkru);
+  	pagefault_enable();
+ -	fpregs_unlock();
+ +	fpregs_unlock(flags);
+  
+  	if (ret) {
+  		if (!__clear_user(buf_fx, fpstate->user_size))
+diff --cc drivers/gpio/gpio-davinci.c
+index 597ea8aaf082,75107ede3bf8..f59195ad16ab
+--- a/drivers/gpio/gpio-davinci.c
++++ b/drivers/gpio/gpio-davinci.c
+@@@ -324,11 -324,10 +324,11 @@@ static int gpio_irq_type(struct irq_dat
+  
+  static struct irq_chip gpio_irqchip = {
+  	.name		= "GPIO",
+- 	.irq_enable	= gpio_irq_enable,
+- 	.irq_disable	= gpio_irq_disable,
++ 	.irq_unmask	= gpio_irq_unmask,
++ 	.irq_mask	= gpio_irq_mask,
+  	.irq_set_type	= gpio_irq_type,
+ -	.flags		= IRQCHIP_SET_TYPE_MASKED | IRQCHIP_SKIP_SET_WAKE,
+ +	.flags		= IRQCHIP_SET_TYPE_MASKED | IRQCHIP_SKIP_SET_WAKE |
+ +			  IRQCHIP_PIPELINE_SAFE,
+  };
+  
+  static void gpio_irq_handler(struct irq_desc *desc)
+diff --cc drivers/net/ethernet/freescale/fec.h
+index 407ddef2c23b,733af928caff..5f14ab80e871
+--- a/drivers/net/ethernet/freescale/fec.h
++++ b/drivers/net/ethernet/freescale/fec.h
+@@@ -694,37 -701,9 +701,39 @@@ struct fec_enet_private 
+  	u64 ethtool_stats[];
+  };
+  
+ +/*
+ + * Check whether oob support is compiled in for the FEC driver. This
+ + * tells nothing about the current execution stage, or whether oob
+ + * diversion is ongoing for any FEC device.
+ + */
+ +static inline bool fec_net_oob(void)
+ +{
+ +	return IS_ENABLED(CONFIG_FEC_OOB);
+ +}
+ +
+ +/*
+ + * Check whether the caller is running on the out-of-band stage, with
+ + * the precondition that oob support is compiled in for the FEC driver.
+ + */
+ +static inline bool fec_running_oob(void)
+ +{
+ +	return fec_net_oob() && running_oob();
+ +}
+ +
+ +/*
+ + * Check whether a FEC device is currently diverting packet to the
+ + * out-of-band netstack. The compiler is given the opportunity to
+ + * compile the whole thing out if either NET_OOB or FEC_OOB which
+ + * depends on it are disabled.
+ + */
+ +static inline bool fec_oob_enabled(struct fec_enet_private *fep)
+ +{
+ +	return IS_ENABLED(CONFIG_FEC_OOB) && netif_oob_diversion(fep->netdev);
+ +}
+ +
+  void fec_ptp_init(struct platform_device *pdev, int irq_idx);
++ void fec_ptp_restore_state(struct fec_enet_private *fep);
++ void fec_ptp_save_state(struct fec_enet_private *fep);
+  void fec_ptp_stop(struct platform_device *pdev);
+  void fec_ptp_start_cyclecounter(struct net_device *ndev);
+  int fec_ptp_set(struct net_device *ndev, struct kernel_hwtstamp_config *config,
+diff --cc kernel/locking/lockdep.c
+index bdd3c28143a3,3468d8230e5f..3699b3eb7b53
+--- a/kernel/locking/lockdep.c
++++ b/kernel/locking/lockdep.c
+@@@ -6324,14 -6242,18 +6327,17 @@@ static void free_zapped_rcu(struct rcu_
+  	pf = delayed_free.pf + (delayed_free.index ^ 1);
+  	__free_zapped_classes(pf);
+  	delayed_free.scheduled = false;
+- 
+- 	/*
+- 	 * If there's anything on the open list, close and start a new callback.
+- 	 */
+- 	call_rcu_zapped(delayed_free.pf + delayed_free.index);
+- 
++ 	need_callback =
++ 		prepare_call_rcu_zapped(delayed_free.pf + delayed_free.index);
+  	lockdep_unlock();
+ -	raw_local_irq_restore(flags);
+ +	lockdep_stage_restore(flags);
++ 
++ 	/*
++ 	* If there's pending free and its callback has not been scheduled,
++ 	* queue an RCU callback.
++ 	*/
++ 	if (need_callback)
++ 		call_rcu(&delayed_free.rcu_head, free_zapped_rcu);
+ -
+  }
+  
+  /*
+@@@ -6378,10 -6301,11 +6385,11 @@@ static void lockdep_free_key_range_reg(
+  	lockdep_lock();
+  	pf = get_pending_free();
+  	__lockdep_free_key_range(pf, start, size);
+- 	call_rcu_zapped(pf);
++ 	need_callback = prepare_call_rcu_zapped(pf);
+  	lockdep_unlock();
+ -	raw_local_irq_restore(flags);
+ +	lockdep_stage_restore(flags);
+- 
++ 	if (need_callback)
++ 		call_rcu(&delayed_free.rcu_head, free_zapped_rcu);
+  	/*
+  	 * Wait for any possible iterators from look_up_lock_class() to pass
+  	 * before continuing to free the memory they refer to.
+@@@ -6475,8 -6399,9 +6483,9 @@@ static void lockdep_reset_lock_reg(stru
+  	struct pending_free *pf;
+  	unsigned long flags;
+  	int locked;
++ 	bool need_callback = false;
+  
+ -	raw_local_irq_save(flags);
+ +	flags = lockdep_stage_disable();
+  	locked = graph_lock();
+  	if (!locked)
+  		goto out_irq;
+@@@ -6487,7 -6412,9 +6496,9 @@@
+  
+  	graph_unlock();
+  out_irq:
+ -	raw_local_irq_restore(flags);
+ +	lockdep_stage_restore(flags);
++ 	if (need_callback)
++ 		call_rcu(&delayed_free.rcu_head, free_zapped_rcu);
+  }
+  
+  /*
+@@@ -6551,11 -6479,14 +6563,14 @@@ void lockdep_unregister_key(struct lock
+  	if (found) {
+  		pf = get_pending_free();
+  		__lockdep_free_key_range(pf, key, 1);
+- 		call_rcu_zapped(pf);
++ 		need_callback = prepare_call_rcu_zapped(pf);
+  	}
+  	lockdep_unlock();
+ -	raw_local_irq_restore(flags);
+ +	lockdep_stage_restore(flags);
+  
++ 	if (need_callback)
++ 		call_rcu(&delayed_free.rcu_head, free_zapped_rcu);
++ 
+  	/* Wait until is_dynamic_key() has finished accessing k->hash_entry. */
+  	synchronize_rcu();
+  }

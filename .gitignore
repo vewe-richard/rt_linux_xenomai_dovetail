@@ -1,0 +1,15 @@
+# Large sub-tree repos (tracked independently)
+linux-dovetail/
+qcom/
+xenomai/
+meta-qcom-realtime/
+
+# Build output
+build/
+
+# Swap files
+*.swp
+.*.swp
+
+# Editor
+*~

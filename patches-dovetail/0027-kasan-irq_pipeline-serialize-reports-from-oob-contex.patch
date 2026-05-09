@@ -1,0 +1,56 @@
+From e7d2096cf2b6f2841d24a420ce977002cf5e8d7e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 20 Dec 2018 15:28:26 +0100
+Subject: [PATCH 027/171] kasan: irq_pipeline: serialize reports from oob
+ contexts
+
+KASAN may detect issues in code running out-of-band, so we have to
+serialize the report handler accordingly by turning the regular
+spinlock into a hard lock.
+
+This will trigger massive a latency spot when a report is emitted, but
+since kernel sanity is at stake when this happens, such spike is not
+the most urgent issue.
+
+This also means that the KASAN report lock becomes a raw lock -
+therefore cannot sleep with full preemption enabled.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ mm/kasan/report.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/mm/kasan/report.c b/mm/kasan/report.c
+index 6e3cb118d20e..a66413f49d69 100644
+--- a/mm/kasan/report.c
++++ b/mm/kasan/report.c
+@@ -199,7 +199,7 @@ static inline void fail_non_kasan_kunit_test(void) { }
+ 
+ #endif /* CONFIG_KUNIT */
+ 
+-static DEFINE_SPINLOCK(report_lock);
++static DEFINE_HARD_SPINLOCK(report_lock);
+ 
+ static void start_report(unsigned long *flags, bool sync)
+ {
+@@ -210,7 +210,7 @@ static void start_report(unsigned long *flags, bool sync)
+ 	lockdep_off();
+ 	/* Make sure we don't end up in loop. */
+ 	report_suppress_start();
+-	spin_lock_irqsave(&report_lock, *flags);
++	raw_spin_lock_irqsave(&report_lock, *flags);
+ 	pr_err("==================================================================\n");
+ }
+ 
+@@ -220,7 +220,7 @@ static void end_report(unsigned long *flags, const void *addr, bool is_write)
+ 		trace_error_report_end(ERROR_DETECTOR_KASAN,
+ 				       (unsigned long)addr);
+ 	pr_err("==================================================================\n");
+-	spin_unlock_irqrestore(&report_lock, *flags);
++	raw_spin_unlock_irqrestore(&report_lock, *flags);
+ 	if (!test_bit(KASAN_BIT_MULTI_SHOT, &kasan_flags))
+ 		check_panic_on_warn("KASAN");
+ 	switch (kasan_arg_fault) {
+-- 
+2.43.0
+

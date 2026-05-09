@@ -1,0 +1,211 @@
+From d2242d2af1682304e6ddcc706254fd54af5d40d0 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 20 Feb 2022 16:51:17 +0100
+Subject: [PATCH 076/171] arm64: vDSO: export user-visible MMIO clocksources
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/include/asm/vdso.h              |  5 ++
+ arch/arm64/include/asm/vdso/gettimeofday.h | 65 ++++++++++++++++++++++
+ arch/arm64/kernel/vdso.c                   | 28 +++++++++-
+ arch/arm64/kernel/vdso/vdso.lds.S          |  3 +
+ arch/arm64/kernel/vdso32/vdso.lds.S        |  3 +
+ lib/vdso/Kconfig                           |  2 +-
+ 6 files changed, 104 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/vdso.h b/arch/arm64/include/asm/vdso.h
+index b4ae32109932..30de8c8a2947 100644
+--- a/arch/arm64/include/asm/vdso.h
++++ b/arch/arm64/include/asm/vdso.h
+@@ -13,6 +13,11 @@
+ #define VDSO_LBASE	0x0
+ 
+ #define __VVAR_PAGES    2
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++#define __VPRIV_PAGES   1
++#else
++#define __VPRIV_PAGES   0
++#endif
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff --git a/arch/arm64/include/asm/vdso/gettimeofday.h b/arch/arm64/include/asm/vdso/gettimeofday.h
+index 764d13e2916c..b3be784ddc33 100644
+--- a/arch/arm64/include/asm/vdso/gettimeofday.h
++++ b/arch/arm64/include/asm/vdso/gettimeofday.h
+@@ -113,6 +113,71 @@ const struct vdso_data *__arch_get_timens_vdso_data(const struct vdso_data *vd)
+ }
+ #endif
+ 
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++
++#include <uapi/linux/fcntl.h>
++
++extern struct vdso_priv _vdso_priv __attribute__((visibility("hidden"))); /* vdso.lds.S */
++
++static __always_inline struct vdso_priv *__arch_get_vdso_priv(void)
++{
++	return &_vdso_priv;
++}
++
++static __always_inline int clock_open_device(const char *path, int mode)
++{
++	register int  sc  asm("w8") = __NR_openat;
++	register long ret asm("x0");
++	register long x0  asm("x0") = AT_FDCWD;
++	register long x1  asm("x1") = (long)path;
++	register long x2  asm("x2") = mode;
++
++	asm volatile(
++		"svc #0\n"
++		: "=r" (ret)
++		: "r" (sc),
++		  "r" (x0), "r" (x1), "r" (x2)
++		: "cc", "memory");
++
++	return ret;
++}
++
++static __always_inline int clock_ioctl_device(int fd, unsigned int cmd, long arg)
++{
++	register int  sc  asm("w8") = __NR_ioctl;
++	register long ret asm("x0");
++	register long x0  asm("x0") = fd;
++	register long x1  asm("x1") = cmd;
++	register long x2  asm("x2") = arg;
++
++	asm volatile(
++		"svc #0\n"
++		: "=r" (ret)
++		: "r" (sc),
++		  "r" (x0), "r" (x1), "r" (x2)
++		: "cc", "memory");
++
++	return ret;
++}
++
++static __always_inline int clock_close_device(int fd)
++{
++	register int  sc  asm("w8") = __NR_close;
++	register long ret asm("x0");
++	register long x0  asm("x0") = fd;
++
++	asm volatile(
++		"svc #0\n"
++		: "=r" (ret)
++		: "r" (sc),
++		  "r" (x0)
++		: "cc", "memory");
++
++	return ret;
++}
++
++#endif	/* CONFIG_GENERIC_CLOCKSOURCE_VDSO */
++
+ #endif /* !__ASSEMBLY__ */
+ 
+ #endif /* __ASM_VDSO_GETTIMEOFDAY_H */
+diff --git a/arch/arm64/kernel/vdso.c b/arch/arm64/kernel/vdso.c
+index d9e1355730ef..e9ea3fef88de 100644
+--- a/arch/arm64/kernel/vdso.c
++++ b/arch/arm64/kernel/vdso.c
+@@ -40,6 +40,8 @@ enum vvar_pages {
+ 	VVAR_NR_PAGES,
+ };
+ 
++#define VPRIV_NR_PAGES __VPRIV_PAGES
++
+ struct vdso_abi_info {
+ 	const char *name;
+ 	const char *vdso_code_start;
+@@ -112,6 +114,9 @@ static int __init __vdso_init(enum vdso_abi abi)
+ 		vdso_pagelist[i] = pfn_to_page(pfn + i);
+ 
+ 	vdso_info[abi].cm->pages = vdso_pagelist;
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++	vdso_data->cs_type_seq = CLOCKSOURCE_VDSO_NONE << 16 | 1;
++#endif
+ 
+ 	return 0;
+ }
+@@ -198,7 +203,8 @@ static int __setup_additional_pages(enum vdso_abi abi,
+ 
+ 	vdso_text_len = vdso_info[abi].vdso_pages << PAGE_SHIFT;
+ 	/* Be sure to map the data page */
+-	vdso_mapping_len = vdso_text_len + VVAR_NR_PAGES * PAGE_SIZE;
++	vdso_mapping_len = vdso_text_len + VVAR_NR_PAGES * PAGE_SIZE
++		+ VPRIV_NR_PAGES * PAGE_SIZE;
+ 
+ 	vdso_base = get_unmapped_area(NULL, 0, vdso_mapping_len, 0, 0);
+ 	if (IS_ERR_VALUE(vdso_base)) {
+@@ -206,6 +212,26 @@ static int __setup_additional_pages(enum vdso_abi abi,
+ 		goto up_fail;
+ 	}
+ 
++	/*
++	 * Install the vDSO mappings we need:
++	 *
++	 * +----------------+
++	 * |     vpriv      |  PAGE_SIZE (private anon page if GENERIC_CLOCKSOURCE_VDSO)
++	 * |----------------|
++	 * |     vvar       |  PAGE_SIZE (shared)
++	 * |----------------|
++	 * |     text       |  text_pages * PAGE_SIZE (shared)
++	 * |        ...     |
++	 * +----------------+
++	 */
++	if (VPRIV_NR_PAGES > 0 && mmap_region(NULL, vdso_base, PAGE_SIZE,
++			VM_READ | VM_WRITE | VM_MAYREAD | VM_MAYWRITE,
++			0, NULL) != vdso_base) {
++		ret = ERR_PTR(-EINVAL);
++		goto up_fail;
++	}
++
++	vdso_base += VPRIV_NR_PAGES * PAGE_SIZE; /* Skip private area. */
+ 	ret = _install_special_mapping(mm, vdso_base, VVAR_NR_PAGES * PAGE_SIZE,
+ 				       VM_READ|VM_MAYREAD|VM_PFNMAP,
+ 				       vdso_info[abi].dm);
+diff --git a/arch/arm64/kernel/vdso/vdso.lds.S b/arch/arm64/kernel/vdso/vdso.lds.S
+index 45354f2ddf70..d26ba1f1039d 100644
+--- a/arch/arm64/kernel/vdso/vdso.lds.S
++++ b/arch/arm64/kernel/vdso/vdso.lds.S
+@@ -22,6 +22,9 @@ SECTIONS
+ #ifdef CONFIG_TIME_NS
+ 	PROVIDE(_timens_data = _vdso_data + PAGE_SIZE);
+ #endif
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++	PROVIDE(_vdso_priv = _vdso_data - __VPRIV_PAGES * PAGE_SIZE);
++#endif	
+ 	. = VDSO_LBASE + SIZEOF_HEADERS;
+ 
+ 	.hash		: { *(.hash) }			:text
+diff --git a/arch/arm64/kernel/vdso32/vdso.lds.S b/arch/arm64/kernel/vdso32/vdso.lds.S
+index 8d95d7d35057..4c99f36c7ae2 100644
+--- a/arch/arm64/kernel/vdso32/vdso.lds.S
++++ b/arch/arm64/kernel/vdso32/vdso.lds.S
+@@ -22,6 +22,9 @@ SECTIONS
+ #ifdef CONFIG_TIME_NS
+ 	PROVIDE_HIDDEN(_timens_data = _vdso_data + PAGE_SIZE);
+ #endif
++#ifdef CONFIG_GENERIC_CLOCKSOURCE_VDSO
++	PROVIDE_HIDDEN(_vdso_priv = _vdso_data - __VPRIV_PAGES * PAGE_SIZE);
++#endif	
+ 	. = VDSO_LBASE + SIZEOF_HEADERS;
+ 
+ 	.hash		: { *(.hash) }			:text
+diff --git a/lib/vdso/Kconfig b/lib/vdso/Kconfig
+index 6b46f6dd76a7..97e344234c5c 100644
+--- a/lib/vdso/Kconfig
++++ b/lib/vdso/Kconfig
+@@ -32,7 +32,7 @@ config GENERIC_VDSO_TIME_NS
+ 
+ config GENERIC_CLOCKSOURCE_VDSO
+         select CLKSRC_MMIO
+-        depends on ARM
++        depends on ARM || ARM64
+ 	bool
+ 	help
+ 	   Enables access to clocksources via the vDSO based on
+-- 
+2.43.0
+

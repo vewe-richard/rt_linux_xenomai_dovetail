@@ -1,0 +1,98 @@
+From 273d8219a8954c71df1882ccd37041059b807bb4 Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Mon, 26 Feb 2024 23:53:42 +0100
+Subject: [PATCH 119/171] dovetail: arch: Fix fetching of the first syscall
+ argument from compat tasks
+
+On x86 there is a small difference in the ABI (= register) where the
+first syscall argument is supplied between the x86_64 (native) and
+compat (i386) case.
+
+On x86_64 the DI register is being used, while i386 used the BX
+register.
+
+The same problem exists for further arguments - handled by
+syscall_get_arguments() - as well. syscall_get_arg0() is dovetail
+specific and is now in sync with syscall_get_arguments().
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/arm/include/asm/syscall.h   | 3 ++-
+ arch/arm64/include/asm/syscall.h | 3 ++-
+ arch/x86/include/asm/syscall.h   | 7 ++++++-
+ kernel/dovetail.c                | 5 ++++-
+ 4 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/include/asm/syscall.h b/arch/arm/include/asm/syscall.h
+index 0cc501cf999b..5407d2de9e73 100644
+--- a/arch/arm/include/asm/syscall.h
++++ b/arch/arm/include/asm/syscall.h
+@@ -80,7 +80,8 @@ static inline void syscall_get_arguments(struct task_struct *task,
+ 	memcpy(args, &regs->ARM_r0 + 1, 5 * sizeof(args[0]));
+ }
+ 
+-static inline unsigned long syscall_get_arg0(struct pt_regs *regs)
++static inline unsigned long syscall_get_arg0(struct task_struct *task,
++					     struct pt_regs *regs)
+ {
+ 	return regs->ARM_ORIG_r0;
+ }
+diff --git a/arch/arm64/include/asm/syscall.h b/arch/arm64/include/asm/syscall.h
+index d130f413e236..3cf5646340c3 100644
+--- a/arch/arm64/include/asm/syscall.h
++++ b/arch/arm64/include/asm/syscall.h
+@@ -73,7 +73,8 @@ static inline void syscall_get_arguments(struct task_struct *task,
+ 	memcpy(args, &regs->regs[1], 5 * sizeof(args[0]));
+ }
+ 
+-static inline unsigned long syscall_get_arg0(struct pt_regs *regs)
++static inline unsigned long syscall_get_arg0(struct task_struct *task,
++					     struct pt_regs *regs)
+ {
+ 	return regs->orig_x0;
+ }
+diff --git a/arch/x86/include/asm/syscall.h b/arch/x86/include/asm/syscall.h
+index 536aae8c8e54..fb2e08b32053 100644
+--- a/arch/x86/include/asm/syscall.h
++++ b/arch/x86/include/asm/syscall.h
+@@ -118,8 +118,13 @@ static inline void syscall_get_arguments(struct task_struct *task,
+ 	}
+ }
+ 
+-static inline unsigned long syscall_get_arg0(struct pt_regs *regs)
++static inline unsigned long syscall_get_arg0(struct task_struct *task,
++					     struct pt_regs *regs)
+ {
++	if (IS_ENABLED(CONFIG_IA32_EMULATION) &&
++	    task->thread_info.status & TS_COMPAT)
++		return regs->bx;
++
+ 	return regs->di;
+ }
+ 
+diff --git a/kernel/dovetail.c b/kernel/dovetail.c
+index 79fd75918b37..2e92d0b0c0ef 100644
+--- a/kernel/dovetail.c
++++ b/kernel/dovetail.c
+@@ -170,6 +170,8 @@ int __pipeline_syscall(struct pt_regs *regs)
+ 
+ static inline bool maybe_oob_syscall(unsigned int nr, struct pt_regs *regs)
+ {
++	struct task_struct *tsk = current;
++
+ 	/*
+ 	 * Check whether the companion core might be interested in the
+ 	 * syscall call. If the old syscall form is handled, pass the
+@@ -182,7 +184,8 @@ static inline bool maybe_oob_syscall(unsigned int nr, struct pt_regs *regs)
+ 			return true;
+ 	}
+ 
+-	return arch_dovetail_is_syscall(nr) && syscall_get_arg0(regs) & __OOB_SYSCALL_BIT;
++	return arch_dovetail_is_syscall(nr) &&
++	       syscall_get_arg0(tsk, regs) & __OOB_SYSCALL_BIT;
+ }
+ 
+ int pipeline_syscall(unsigned int nr, struct pt_regs *regs)
+-- 
+2.43.0
+

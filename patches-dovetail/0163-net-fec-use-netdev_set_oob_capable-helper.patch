@@ -1,0 +1,26 @@
+From f97621683e6176233f4bd21b7082d2d43ea599e9 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 4 Nov 2024 14:29:38 +0100
+Subject: [PATCH 163/171] net: fec: use netdev_set_oob_capable() helper
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/net/ethernet/freescale/fec_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/freescale/fec_main.c b/drivers/net/ethernet/freescale/fec_main.c
+index b9ba11d352ea..ba673408de8e 100644
+--- a/drivers/net/ethernet/freescale/fec_main.c
++++ b/drivers/net/ethernet/freescale/fec_main.c
+@@ -4650,7 +4650,7 @@ fec_probe(struct platform_device *pdev)
+ 	INIT_WORK(&fep->tx_timeout_work, fec_enet_timeout_work);
+ 
+ 	if (IS_ENABLED(CONFIG_FEC_OOB)) {
+-		ndev->priv_flags |= IFF_OOB_CAPABLE;
++		netdev_set_oob_capable(ndev);
+ 		netdev_info(ndev, "FEC device is oob-capable\n");
+ 	}
+ 
+-- 
+2.43.0
+

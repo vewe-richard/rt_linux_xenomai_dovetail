@@ -1,0 +1,39 @@
+From b305c9362d436f713c5adb27e603f518a71148ae Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 3 Oct 2023 16:06:50 +0200
+Subject: [PATCH 106/171] genirq: irq_pipeline: extend in_nonmaskable() to any
+ oob context
+
+From the standpoint of tne in-band stage, any oob activity stands for
+a non-maskable event being handled, which includes the pipeline entry
+context.
+
+By extending in_nonmaskable() to any oob context, we allow for using
+the RCU read lock side in such context.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/hardirq.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/hardirq.h b/include/linux/hardirq.h
+index 3ac0660a46d1..2ba79d08005c 100644
+--- a/include/linux/hardirq.h
++++ b/include/linux/hardirq.h
+@@ -150,7 +150,12 @@ static inline bool on_pipeline_entry(void)
+ 
+ static inline bool in_nonmaskable(void)
+ {
+-	return on_pipeline_entry() || in_nmi();
++	/*
++	 * From the standpoint of tne in-band stage, any oob activity
++	 * stands for a non-maskable event being handled (including
++	 * the pipeline entry context).
++	 */
++	return running_oob() || in_nmi();
+ }
+ 
+ #endif /* LINUX_HARDIRQ_H */
+-- 
+2.43.0
+

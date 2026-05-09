@@ -1,0 +1,60 @@
+From 5bec2af185bc5450f2d0a66815db1df00411434b Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 1 Feb 2024 10:34:34 +0100
+Subject: [PATCH 143/171] net: dovetail: notify oob about socket shutdown
+ requests
+
+A companion core providing a network stack extension to existing
+protocols may want to receive shutdown() requests for sockets. Call
+the new sock_oob_shutdown() handler with user-originated requests for
+this purpose.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ net/socket.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/net/socket.c b/net/socket.c
+index 8e8f8df59c7a..8bc5db7b110f 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -173,6 +173,11 @@ int __weak sock_oob_connect(struct socket *sock,
+ 	return 0;
+ }
+ 
++int __weak sock_oob_shutdown(struct socket *sock, int how)
++{
++	return 0;
++}
++
+ long __weak sock_inband_ioctl_redirect(struct socket *sock,
+ 				unsigned int cmd, unsigned long arg)
+ {
+@@ -229,6 +234,11 @@ static inline int sock_oob_connect(struct socket *sock,
+ 	return 0;
+ }
+ 
++static inline int sock_oob_shutdown(struct socket *sock, int how)
++{
++	return 0;
++}
++
+ static inline long sock_inband_ioctl_redirect(struct socket *sock,
+ 					unsigned int cmd, unsigned long arg)
+ {
+@@ -2553,8 +2563,11 @@ int __sys_shutdown_sock(struct socket *sock, int how)
+ 	int err;
+ 
+ 	err = security_socket_shutdown(sock, how);
+-	if (!err)
++	if (!err) {
+ 		err = READ_ONCE(sock->ops)->shutdown(sock, how);
++		if (!err && sock_oob_capable(sock))
++			err = sock_oob_shutdown(sock, how);
++	}
+ 
+ 	return err;
+ }
+-- 
+2.43.0
+

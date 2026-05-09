@@ -1,0 +1,460 @@
+From cd1a2a0501033a1bac4fcac663afdfc8365d54c0 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 14 Sep 2018 11:17:29 +0200
+Subject: [PATCH 073/171] arm64: dovetail: route traps
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/include/asm/dovetail.h    | 40 ++++++++++++++++++++++++++++
+ arch/arm64/include/asm/thread_info.h |  1 +
+ arch/arm64/kernel/debug-monitors.c   |  2 +-
+ arch/arm64/kernel/fpsimd.c           | 24 +++++++++++++----
+ arch/arm64/kernel/signal.c           | 26 ++++++++++++++++++
+ arch/arm64/kernel/traps.c            | 25 ++++++++++++++---
+ arch/arm64/mm/fault.c                | 37 +++++++++++++++++++++----
+ 7 files changed, 141 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm64/include/asm/dovetail.h b/arch/arm64/include/asm/dovetail.h
+index 8c0af9bbf972..66ee2be623ce 100644
+--- a/arch/arm64/include/asm/dovetail.h
++++ b/arch/arm64/include/asm/dovetail.h
+@@ -6,4 +6,44 @@
+ #ifndef _ASM_ARM64_DOVETAIL_H
+ #define _ASM_ARM64_DOVETAIL_H
+ 
++/* ARM64 traps */
++#define ARM64_TRAP_ACCESS	0	/* Data or instruction access exception */
++#define ARM64_TRAP_ALIGN	1	/* SP/PC alignment abort */
++#define ARM64_TRAP_SEA		2	/* Synchronous external abort */
++#define ARM64_TRAP_DEBUG	3	/* Debug trap */
++#define ARM64_TRAP_UNDI		4	/* Undefined instruction */
++#define ARM64_TRAP_UNDSE	5	/* Undefined synchronous exception */
++#define ARM64_TRAP_FPE		6	/* FPSIMD exception */
++#define ARM64_TRAP_SVE		7	/* SVE access trap */
++#define ARM64_TRAP_BTI		8	/* Branch target identification */
++#define ARM64_TRAP_SME		9	/* SME access trap */
++
++/*
++ * Pass the trap event to the companion core. Return true if running
++ * in-band afterwards.
++ */
++#define mark_cond_trap_entry(__trapnr, __regs)			\
++	({							\
++	  	bool __ret;					\
++		oob_trap_notify(__trapnr, __regs);		\
++		__ret = running_inband();			\
++		if (!__ret)					\
++			oob_trap_unwind(__trapnr, __regs);	\
++		__ret;						\
++	})
++
++/*
++ * Pass the trap event to the companion core. We expect the current
++ * context to be running on the in-band stage upon return so that our
++ * caller can tread on common kernel code.
++ */
++#define mark_trap_entry(__trapnr, __regs)				\
++	do {								\
++		bool __ret = mark_cond_trap_entry(__trapnr, __regs);	\
++		BUG_ON(dovetail_debug() && !__ret);			\
++	} while (0)
++
++#define mark_trap_exit(__trapnr, __regs)				\
++	oob_trap_unwind(__trapnr, __regs)
++
+ #endif /* _ASM_ARM64_DOVETAIL_H */
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index 13b8c36253b6..901e2a3788df 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -136,5 +136,6 @@ void arch_setup_new_exec(void);
+ #define _TLF_OOB		0x0001
+ #define _TLF_DOVETAIL		0x0002
+ #define _TLF_OFFSTAGE		0x0004
++#define _TLF_OOBTRAP		0x0008
+ 
+ #endif /* __ASM_THREAD_INFO_H */
+diff --git a/arch/arm64/kernel/debug-monitors.c b/arch/arm64/kernel/debug-monitors.c
+index 64f2ecbdfe5c..32271ed24ef5 100644
+--- a/arch/arm64/kernel/debug-monitors.c
++++ b/arch/arm64/kernel/debug-monitors.c
+@@ -232,7 +232,7 @@ static void send_user_sigtrap(int si_code)
+ 		return;
+ 
+ 	if (interrupts_enabled(regs))
+-		local_irq_enable();
++		local_irq_enable_full();
+ 
+ 	arm64_force_sig_fault(SIGTRAP, si_code, instruction_pointer(regs),
+ 			      "User debug trap");
+diff --git a/arch/arm64/kernel/fpsimd.c b/arch/arm64/kernel/fpsimd.c
+index 91e44ac7150f..8a06cb1dbc3d 100644
+--- a/arch/arm64/kernel/fpsimd.c
++++ b/arch/arm64/kernel/fpsimd.c
+@@ -1443,16 +1443,18 @@ static void sve_init_regs(void)
+  */
+ void do_sve_acc(unsigned long esr, struct pt_regs *regs)
+ {
++	oob_trap_notify(ARM64_TRAP_SVE, regs);
++
+ 	/* Even if we chose not to use SVE, the hardware could still trap: */
+ 	if (unlikely(!system_supports_sve()) || WARN_ON(is_compat_task())) {
+ 		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
+-		return;
++		goto out;
+ 	}
+ 
+ 	sve_alloc(current, true);
+ 	if (!current->thread.sve_state) {
+ 		force_sig(SIGKILL);
+-		return;
++		goto out;
+ 	}
+ 
+ 	get_cpu_fpsimd_context();
+@@ -1470,6 +1472,8 @@ void do_sve_acc(unsigned long esr, struct pt_regs *regs)
+ 	sve_init_regs();
+ 
+ 	put_cpu_fpsimd_context();
++out:
++	oob_trap_unwind(ARM64_TRAP_SVE, regs);
+ }
+ 
+ /*
+@@ -1485,10 +1489,14 @@ void do_sve_acc(unsigned long esr, struct pt_regs *regs)
+  */
+ void do_sme_acc(unsigned long esr, struct pt_regs *regs)
+ {
++	unsigned long flags;
++
++	oob_trap_notify(ARM64_TRAP_SME, regs);
++
+ 	/* Even if we chose not to use SME, the hardware could still trap: */
+ 	if (unlikely(!system_supports_sme()) || WARN_ON(is_compat_task())) {
+ 		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
+-		return;
++		goto out;
+ 	}
+ 
+ 	/*
+@@ -1497,14 +1505,14 @@ void do_sme_acc(unsigned long esr, struct pt_regs *regs)
+ 	 */
+ 	if (ESR_ELx_ISS(esr) != ESR_ELx_SME_ISS_SME_DISABLED) {
+ 		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
+-		return;
++		goto out;
+ 	}
+ 
+ 	sve_alloc(current, false);
+ 	sme_alloc(current, true);
+ 	if (!current->thread.sve_state || !current->thread.sme_state) {
+ 		force_sig(SIGKILL);
+-		return;
++		goto out;
+ 	}
+ 
+ 	get_cpu_fpsimd_context();
+@@ -1522,6 +1530,8 @@ void do_sme_acc(unsigned long esr, struct pt_regs *regs)
+ 	}
+ 
+ 	put_cpu_fpsimd_context();
++out:
++	oob_trap_unwind(ARM64_TRAP_SME, regs);
+ }
+ 
+ /*
+@@ -1553,9 +1563,13 @@ void do_fpsimd_exc(unsigned long esr, struct pt_regs *regs)
+ 			si_code = FPE_FLTRES;
+ 	}
+ 
++	oob_trap_notify(ARM64_TRAP_FPE, regs);
++
+ 	send_sig_fault(SIGFPE, si_code,
+ 		       (void __user *)instruction_pointer(regs),
+ 		       current);
++
++	oob_trap_unwind(ARM64_TRAP_FPE, regs);
+ }
+ 
+ void fpsimd_thread_switch(struct task_struct *next)
+diff --git a/arch/arm64/kernel/signal.c b/arch/arm64/kernel/signal.c
+index c5b18dc38ac3..d2ae16680752 100644
+--- a/arch/arm64/kernel/signal.c
++++ b/arch/arm64/kernel/signal.c
+@@ -1279,6 +1279,17 @@ static void do_signal(struct pt_regs *regs)
+ 	restore_saved_sigmask();
+ }
+ 
++static inline void do_retuser(void)
++{
++	unsigned long thread_flags;
++
++	if (dovetailing()) {
++		thread_flags = current_thread_info()->flags;
++		if (thread_flags & _TIF_RETUSER)
++			inband_retuser_notify();
++	}
++}
++
+ void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
+ {
+ 	WARN_ON_ONCE(irq_pipeline_debug() && running_oob());
+@@ -1314,8 +1325,23 @@ void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
+ 
+ 			if (thread_flags & _TIF_FOREIGN_FPSTATE)
+ 				fpsimd_restore_current_state();
++
++			do_retuser();
++			/* RETUSER might have switched oob */
++			if (running_oob()) {
++				local_daif_mask();
++				return;
++			}
+ 		}
+ 
++		/*
++		 * Dovetail: we may have restored the fpsimd state for
++		 * current with no other opportunity to check for
++		 * _TIF_FOREIGN_FPSTATE until we are back running on
++		 * el0, so we must not take any interrupt until then,
++		 * otherwise we may end up resuming with some OOB
++		 * thread's fpsimd state.
++		 */
+ 		local_daif_mask();
+ 		thread_flags = read_thread_flags();
+ 	} while (thread_flags & _TIF_WORK_MASK);
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index 80fcef35530c..b0db35eda8f5 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -456,6 +456,13 @@ void do_el0_undef(struct pt_regs *regs, unsigned long esr)
+ {
+ 	u32 insn;
+ 
++	/*
++	 * If the companion core did not switched us to in-band
++	 * context, we may assume that it has handled the trap.
++	 */
++	if (running_oob())
++		return;
++
+ 	/* check for AArch32 breakpoint instructions */
+ 	if (!aarch32_break_handler(regs))
+ 		return;
+@@ -470,7 +477,9 @@ void do_el0_undef(struct pt_regs *regs, unsigned long esr)
+ 		return;
+ 
+ out_err:
++	mark_trap_entry(ARM64_TRAP_UNDI, regs);
+ 	force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
++	mark_trap_exit(ARM64_TRAP_UNDI, regs);
+ }
+ 
+ void do_el1_undef(struct pt_regs *regs, unsigned long esr)
+@@ -489,7 +498,9 @@ void do_el1_undef(struct pt_regs *regs, unsigned long esr)
+ 
+ void do_el0_bti(struct pt_regs *regs)
+ {
++	mark_trap_entry(ARM64_TRAP_BTI, regs);
+ 	force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
++	mark_trap_exit(ARM64_TRAP_BTI, regs);
+ }
+ 
+ void do_el1_bti(struct pt_regs *regs, unsigned long esr)
+@@ -621,10 +632,13 @@ static void user_cache_maint_handler(unsigned long esr, struct pt_regs *regs)
+ 		return;
+ 	}
+ 
+-	if (ret)
++	if (ret) {
++		mark_trap_entry(ARM64_TRAP_ACCESS, regs);
+ 		arm64_notify_segfault(tagged_address);
+-	else
++		mark_trap_exit(ARM64_TRAP_ACCESS, regs);
++	} else {
+ 		arm64_skip_faulting_instruction(regs, AARCH64_INSN_SIZE);
++	}
+ }
+ 
+ static void ctr_read_handler(unsigned long esr, struct pt_regs *regs)
+@@ -669,8 +683,11 @@ static void mrs_handler(unsigned long esr, struct pt_regs *regs)
+ 	rt = ESR_ELx_SYS64_ISS_RT(esr);
+ 	sysreg = esr_sys64_to_sysreg(esr);
+ 
+-	if (do_emulate_mrs(regs, sysreg, rt) != 0)
++	if (do_emulate_mrs(regs, sysreg, rt) != 0) {
++		mark_trap_entry(ARM64_TRAP_ACCESS, regs);
+ 		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
++		mark_trap_exit(ARM64_TRAP_ACCESS, regs);
++	}
+ }
+ 
+ static void wfi_handler(unsigned long esr, struct pt_regs *regs)
+@@ -910,11 +927,13 @@ void bad_el0_sync(struct pt_regs *regs, int reason, unsigned long esr)
+ {
+ 	unsigned long pc = instruction_pointer(regs);
+ 
++	mark_trap_entry(ARM64_TRAP_ACCESS, regs);
+ 	current->thread.fault_address = 0;
+ 	current->thread.fault_code = esr;
+ 
+ 	arm64_force_sig_fault(SIGILL, ILL_ILLOPC, pc,
+ 			      "Bad EL0 synchronous exception");
++	mark_trap_exit(ARM64_TRAP_ACCESS, regs);
+ }
+ 
+ #ifdef CONFIG_VMAP_STACK
+diff --git a/arch/arm64/mm/fault.c b/arch/arm64/mm/fault.c
+index 94fc991bf451..f713f6449af7 100644
+--- a/arch/arm64/mm/fault.c
++++ b/arch/arm64/mm/fault.c
+@@ -415,6 +415,12 @@ static void __do_kernel_fault(unsigned long addr, unsigned long esr,
+ 	if (efi_runtime_fixup_exception(regs, msg))
+ 		return;
+ 
++	/*
++	 * Dovetail: Don't bother restoring the in-band stage in the
++	 * non-recoverable fault case, we got busted and a full stage
++	 * switch is likely to make things even worse. Try at least to
++	 * get some debug output before panicking.
++	 */
+ 	die_kernel_fault(msg, addr, esr, regs);
+ }
+ 
+@@ -487,8 +493,10 @@ static void do_bad_area(unsigned long far, unsigned long esr,
+ 	if (user_mode(regs)) {
+ 		const struct fault_info *inf = esr_to_fault_info(esr);
+ 
++		oob_trap_notify(ARM64_TRAP_ACCESS, regs);
+ 		set_thread_esr(addr, esr);
+ 		arm64_force_sig_fault(inf->sig, inf->code, far, inf->name);
++		oob_trap_unwind(ARM64_TRAP_ACCESS, regs);
+ 	} else {
+ 		__do_kernel_fault(addr, esr, regs);
+ 	}
+@@ -541,6 +549,8 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
+ 	if (kprobe_page_fault(regs, esr))
+ 		return 0;
+ 
++	oob_trap_notify(ARM64_TRAP_ACCESS, regs);
++
+ 	/*
+ 	 * If we're in an interrupt or have no user context, we must not take
+ 	 * the fault.
+@@ -629,7 +639,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
+ 	if (fault_signal_pending(fault, regs)) {
+ 		if (!user_mode(regs))
+ 			goto no_context;
+-		return 0;
++		goto out;
+ 	}
+ 
+ 	/* The fault is fully completed (including releasing mmap lock) */
+@@ -648,7 +658,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
+ 	 */
+ 	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP |
+ 			      VM_FAULT_BADACCESS))))
+-		return 0;
++		goto out;
+ 
+ 	/*
+ 	 * If we are in kernel mode at this point, we have no context to
+@@ -664,7 +674,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
+ 		 * oom-killed).
+ 		 */
+ 		pagefault_out_of_memory();
+-		return 0;
++		goto out;
+ 	}
+ 
+ 	inf = esr_to_fault_info(esr);
+@@ -693,10 +703,12 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
+ 				      far, inf->name);
+ 	}
+ 
+-	return 0;
++	goto out;
+ 
+ no_context:
+ 	__do_kernel_fault(addr, esr, regs);
++out:
++	oob_trap_unwind(ARM64_TRAP_ACCESS, regs);
+ 	return 0;
+ }
+ 
+@@ -733,6 +745,8 @@ static int do_sea(unsigned long far, unsigned long esr, struct pt_regs *regs)
+ 	const struct fault_info *inf;
+ 	unsigned long siaddr;
+ 
++	oob_trap_notify(ARM64_TRAP_SEA, regs);
++
+ 	inf = esr_to_fault_info(esr);
+ 
+ 	if (user_mode(regs) && apei_claim_sea(regs) == 0) {
+@@ -740,7 +754,7 @@ static int do_sea(unsigned long far, unsigned long esr, struct pt_regs *regs)
+ 		 * APEI claimed this as a firmware-first notification.
+ 		 * Some processing deferred to task_work before ret_to_user().
+ 		 */
+-		return 0;
++		goto out;
+ 	}
+ 
+ 	if (esr & ESR_ELx_FnV) {
+@@ -754,6 +768,8 @@ static int do_sea(unsigned long far, unsigned long esr, struct pt_regs *regs)
+ 		siaddr  = untagged_addr(far);
+ 	}
+ 	arm64_notify_die(inf->name, regs, inf->sig, inf->code, siaddr, esr);
++out:
++	oob_trap_unwind(ARM64_TRAP_SEA, regs);
+ 
+ 	return 0;
+ }
+@@ -846,6 +862,8 @@ void do_mem_abort(unsigned long far, unsigned long esr, struct pt_regs *regs)
+ 	if (!inf->fn(far, esr, regs))
+ 		return;
+ 
++	oob_trap_notify(ARM64_TRAP_ACCESS, regs);
++
+ 	if (!user_mode(regs))
+ 		die_kernel_fault(inf->name, addr, esr, regs);
+ 
+@@ -855,13 +873,18 @@ void do_mem_abort(unsigned long far, unsigned long esr, struct pt_regs *regs)
+ 	 * address to the signal handler.
+ 	 */
+ 	arm64_notify_die(inf->name, regs, inf->sig, inf->code, addr, esr);
++	oob_trap_unwind(ARM64_TRAP_ACCESS, regs);
+ }
+ NOKPROBE_SYMBOL(do_mem_abort);
+ 
+ void do_sp_pc_abort(unsigned long addr, unsigned long esr, struct pt_regs *regs)
+ {
++	oob_trap_notify(ARM64_TRAP_ALIGN, regs);
++
+ 	arm64_notify_die("SP/PC alignment exception", regs, SIGBUS, BUS_ADRALN,
+ 			 addr, esr);
++
++	oob_trap_unwind(ARM64_TRAP_ALIGN, regs);
+ }
+ NOKPROBE_SYMBOL(do_sp_pc_abort);
+ 
+@@ -921,6 +944,8 @@ void do_debug_exception(unsigned long addr_if_watchpoint, unsigned long esr,
+ 	const struct fault_info *inf = esr_to_debug_fault_info(esr);
+ 	unsigned long pc = instruction_pointer(regs);
+ 
++	oob_trap_notify(ARM64_TRAP_DEBUG, regs);
++
+ 	debug_exception_enter(regs);
+ 
+ 	if (user_mode(regs) && !is_ttbr0_addr(pc))
+@@ -931,6 +956,8 @@ void do_debug_exception(unsigned long addr_if_watchpoint, unsigned long esr,
+ 	}
+ 
+ 	debug_exception_exit(regs);
++
++	oob_trap_unwind(ARM64_TRAP_DEBUG, regs);
+ }
+ NOKPROBE_SYMBOL(do_debug_exception);
+ 
+-- 
+2.43.0
+

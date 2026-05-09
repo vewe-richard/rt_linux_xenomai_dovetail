@@ -1,0 +1,96 @@
+From c9c4e9ca2e126a50277d15f20ef3ed1127be0f54 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 27 Oct 2020 11:25:04 +0100
+Subject: [PATCH 020/171] clocksource/exynos_mct: turn into user-visible MMIO
+ clocksource
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/clocksource/Kconfig      |  1 +
+ drivers/clocksource/exynos_mct.c | 34 ++++++++++++++++++--------------
+ 2 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/clocksource/Kconfig b/drivers/clocksource/Kconfig
+index 7fd156d4b6e8..c99c0316ccdb 100644
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -439,6 +439,7 @@ config CLKSRC_EXYNOS_MCT
+ 	bool "Exynos multi core timer driver" if COMPILE_TEST
+ 	depends on ARM || ARM64
+ 	depends on ARCH_ARTPEC || ARCH_EXYNOS || COMPILE_TEST
++	imply GENERIC_CLOCKSOURCE_VDSO
+ 	help
+ 	  Support for Multi Core Timer controller on Exynos SoCs.
+ 
+diff --git a/drivers/clocksource/exynos_mct.c b/drivers/clocksource/exynos_mct.c
+index ef8cb1b71be4..c90924e9a56a 100644
+--- a/drivers/clocksource/exynos_mct.c
++++ b/drivers/clocksource/exynos_mct.c
+@@ -200,23 +200,20 @@ static u32 notrace exynos4_read_count_32(void)
+ 	return readl_relaxed(reg_base + EXYNOS4_MCT_G_CNT_L);
+ }
+ 
+-static u64 exynos4_frc_read(struct clocksource *cs)
+-{
+-	return exynos4_read_count_32();
+-}
+-
+ static void exynos4_frc_resume(struct clocksource *cs)
+ {
+ 	exynos4_mct_frc_start();
+ }
+ 
+-static struct clocksource mct_frc = {
+-	.name		= "mct-frc",
+-	.rating		= MCT_CLKSOURCE_RATING,
+-	.read		= exynos4_frc_read,
+-	.mask		= CLOCKSOURCE_MASK(32),
+-	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+-	.resume		= exynos4_frc_resume,
++static struct clocksource_user_mmio mct_frc = {
++	.mmio.clksrc = {
++		.name		= "mct-frc",
++		.rating		= MCT_CLKSOURCE_RATING,
++		.read		= clocksource_mmio_readl_up,
++		.mask		= CLOCKSOURCE_MASK(32),
++		.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
++		.resume		= exynos4_frc_resume,
++	},
+ };
+ 
+ static u64 notrace exynos4_read_sched_clock(void)
+@@ -237,12 +234,14 @@ static cycles_t exynos4_read_current_timer(void)
+ 
+ static int __init exynos4_clocksource_init(bool frc_shared)
+ {
++	struct clocksource_mmio_regs mmr;
++
+ 	/*
+ 	 * When the frc is shared, the main processer should have already
+ 	 * turned it on and we shouldn't be writing to TCON.
+ 	 */
+ 	if (frc_shared)
+-		mct_frc.resume = NULL;
++		mct_frc.mmio.clksrc.resume = NULL;
+ 	else
+ 		exynos4_mct_frc_start();
+ 
+@@ -252,8 +251,13 @@ static int __init exynos4_clocksource_init(bool frc_shared)
+ 	register_current_timer_delay(&exynos4_delay_timer);
+ #endif
+ 
+-	if (clocksource_register_hz(&mct_frc, clk_rate))
+-		panic("%s: can't register clocksource\n", mct_frc.name);
++	mmr.reg_upper = NULL;
++	mmr.reg_lower = reg_base + EXYNOS4_MCT_G_CNT_L;
++	mmr.bits_upper = 0;
++	mmr.bits_lower = 32;
++	mmr.revmap = NULL;
++	if (clocksource_user_mmio_init(&mct_frc, &mmr, clk_rate))
++		panic("%s: can't register clocksource\n", mct_frc.mmio.clksrc.name);
+ 
+ 	sched_clock_register(exynos4_read_sched_clock, 32, clk_rate);
+ 
+-- 
+2.43.0
+

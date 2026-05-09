@@ -1,0 +1,35 @@
+From abac9472655252395af0bb66c46a6eff85c59387 Mon Sep 17 00:00:00 2001
+From: Jan Kiszka <jan.kiszka@siemens.com>
+Date: Mon, 26 Aug 2024 08:31:49 +0200
+Subject: [PATCH 131/171] dovetail: Account for invalid syscall number
+
+At least on x86, the kernel may have decided to invalidate the syscall
+number while processing it. Avoid that we process this -1 as legacy
+syscall.
+
+This was a long-pending issue in the whole dovetail series, now revealed
+by running auditd on one of the test systems. Syscall auditing was
+eventually catching an unbalanced tracing, caused by a premature syscall
+exit due to this bug.
+
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+---
+ kernel/dovetail.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/dovetail.c b/kernel/dovetail.c
+index 08c649d6e9d9..bcd49183f8eb 100644
+--- a/kernel/dovetail.c
++++ b/kernel/dovetail.c
+@@ -119,7 +119,7 @@ static bool __in_oob_syscall(struct task_struct *tsk,
+ 	 * a PR_OOB_SYSCALL command (new/current call form).
+ 	 */
+ 	if (IS_ENABLED(CONFIG_DOVETAIL_LEGACY_SYSCALL_RANGE)) {
+-		if (nr & __OOB_SYSCALL_BIT)
++		if (nr != -1 && nr & __OOB_SYSCALL_BIT)
+ 			return true;
+ 	}
+ 
+-- 
+2.43.0
+

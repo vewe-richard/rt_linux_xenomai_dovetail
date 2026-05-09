@@ -1,0 +1,34 @@
+From 5b19a14b7a39d1b9e721da2357a939a4b1500eee Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 16 Jul 2021 09:09:47 +0200
+Subject: [PATCH 047/171] PCI: brcmstb: irq_pipeline: enable pipelined
+ interrupt control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/pci/controller/pcie-brcmstb.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/pci/controller/pcie-brcmstb.c b/drivers/pci/controller/pcie-brcmstb.c
+index f9dd6622fe10..a7a94d99998e 100644
+--- a/drivers/pci/controller/pcie-brcmstb.c
++++ b/drivers/pci/controller/pcie-brcmstb.c
+@@ -436,6 +436,7 @@ static struct irq_chip brcm_msi_irq_chip = {
+ 	.irq_ack         = irq_chip_ack_parent,
+ 	.irq_mask        = pci_msi_mask_irq,
+ 	.irq_unmask      = pci_msi_unmask_irq,
++	.flags		 = IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static struct msi_domain_info brcm_msi_domain_info = {
+@@ -498,6 +499,7 @@ static struct irq_chip brcm_msi_bottom_irq_chip = {
+ 	.irq_compose_msi_msg	= brcm_msi_compose_msi_msg,
+ 	.irq_set_affinity	= brcm_msi_set_affinity,
+ 	.irq_ack                = brcm_msi_ack_irq,
++	.flags		 	= IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static int brcm_msi_alloc(struct brcm_msi *msi, unsigned int nr_irqs)
+-- 
+2.43.0
+

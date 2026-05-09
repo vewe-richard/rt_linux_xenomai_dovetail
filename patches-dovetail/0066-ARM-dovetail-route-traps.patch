@@ -1,0 +1,763 @@
+From 604b4765e7d2a6e6212d52616d9fd7c07af2dd5d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 12 May 2020 18:08:35 +0200
+Subject: [PATCH 066/171] ARM: dovetail: route traps
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+
+arm: dovetail: allow for conditional trap handling
+
+Some companion cores may want to fully handle some of the traps
+directly from the out-of-band stage, without demoting the current
+context to the in-band stage. Typically, the undefined instruction and
+VFP exception error traps could be handled that way. For such traps,
+instead of applying the in-band fixups unconditionally, assume the
+following:
+
+- if the companion core switches in-band upon notification, then the
+in-band kernel code may assume that all regular fixups need to be
+applied next. This is the common case for most traps.
+
+- if the companion core stays on the out-of-band stage upon
+notification, then the in-band kernel code should assume that all
+required fixups were done from that stage already, returning asap from
+the outer trap handler.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/include/asm/assembler.h        | 12 ----
+ arch/arm/include/asm/dovetail.h         | 56 +++++++++++++++
+ arch/arm/include/asm/thread_info.h      |  1 +
+ arch/arm/include/asm/trace/exceptions.h | 62 ++++++++++++++++
+ arch/arm/kernel/entry-armv.S            | 20 ++++++
+ arch/arm/kernel/ptrace.c                |  2 +
+ arch/arm/mm/alignment.c                 | 17 +++--
+ arch/arm/mm/fault.c                     | 60 ++++++++++------
+ arch/arm/vfp/vfpmodule.c                | 96 ++++++++++++++++++-------
+ 9 files changed, 261 insertions(+), 65 deletions(-)
+ create mode 100644 arch/arm/include/asm/trace/exceptions.h
+
+diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
+index 5f81a4af4683..31263e0a31d6 100644
+--- a/arch/arm/include/asm/assembler.h
++++ b/arch/arm/include/asm/assembler.h
+@@ -149,18 +149,6 @@ THUMB(	fpreg	.req	r7	)
+ #endif
+ 	.endm
+ 
+-	.macro  disable_irq_if_pipelined
+-#ifdef CONFIG_IRQ_PIPELINE
+-	disable_irq_notrace
+-#endif
+-	.endm
+-
+-	.macro  enable_irq_if_pipelined
+-#ifdef CONFIG_IRQ_PIPELINE
+-	enable_irq_notrace
+-#endif
+-	.endm
+-
+ 	.macro disable_irq, save=1
+ 	disable_irq_notrace
+ 	asm_trace_hardirqs_off \save
+diff --git a/arch/arm/include/asm/dovetail.h b/arch/arm/include/asm/dovetail.h
+index 86e81cce967c..795a1fb903ec 100644
+--- a/arch/arm/include/asm/dovetail.h
++++ b/arch/arm/include/asm/dovetail.h
+@@ -6,4 +6,60 @@
+ #ifndef _ASM_ARM_DOVETAIL_H
+ #define _ASM_ARM_DOVETAIL_H
+ 
++/* ARM traps */
++#define ARM_TRAP_ACCESS		0	/* Data or instruction access exception */
++#define ARM_TRAP_SECTION	1	/* Section fault */
++#define ARM_TRAP_DABT		2	/* Generic data abort */
++#define ARM_TRAP_PABT		3	/* Prefetch abort */
++#define ARM_TRAP_BREAK		4	/* Instruction breakpoint */
++#define ARM_TRAP_FPU		5	/* Floating point exception */
++#define ARM_TRAP_VFP		6	/* VFP floating point exception */
++#define ARM_TRAP_UNDEFINSTR	7	/* Undefined instruction */
++#define ARM_TRAP_ALIGNMENT	8	/* Unaligned access exception */
++
++#if !defined(__ASSEMBLY__)
++
++#ifdef CONFIG_DOVETAIL
++
++static inline void arch_dovetail_exec_prepare(void)
++{ }
++
++static inline void arch_dovetail_switch_prepare(bool leave_inband)
++{ }
++
++static inline void arch_dovetail_switch_finish(bool enter_inband)
++{ }
++
++#endif
++
++/*
++ * Pass the trap event to the companion core. Return true if running
++ * in-band afterwards.
++ */
++#define mark_cond_trap_entry(__trapnr, __regs)			\
++	({							\
++	  	bool __ret;					\
++		oob_trap_notify(__trapnr, __regs);		\
++		__ret = running_inband();			\
++		if (!__ret)					\
++			oob_trap_unwind(__trapnr, __regs);	\
++		__ret;						\
++	})
++
++/*
++ * Pass the trap event to the companion core. We expect the current
++ * context to be running on the in-band stage upon return so that our
++ * caller can tread on common kernel code.
++ */
++#define mark_trap_entry(__trapnr, __regs)				\
++	do {								\
++		bool __ret = mark_cond_trap_entry(__trapnr, __regs);	\
++		BUG_ON(dovetail_debug() && !__ret);			\
++	} while (0)
++
++#define mark_trap_exit(__trapnr, __regs)				\
++	oob_trap_unwind(__trapnr, __regs)
++
++#endif	/* !__ASSEMBLY__ */
++
+ #endif /* _ASM_ARM_DOVETAIL_H */
+diff --git a/arch/arm/include/asm/thread_info.h b/arch/arm/include/asm/thread_info.h
+index 7352084fa049..819d8f3130ea 100644
+--- a/arch/arm/include/asm/thread_info.h
++++ b/arch/arm/include/asm/thread_info.h
+@@ -190,6 +190,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define _TLF_OOB		0x0001
+ #define _TLF_DOVETAIL		0x0002
+ #define _TLF_OFFSTAGE		0x0004
++#define _TLF_OOBTRAP		0x0008
+ 
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_ARM_THREAD_INFO_H */
+diff --git a/arch/arm/include/asm/trace/exceptions.h b/arch/arm/include/asm/trace/exceptions.h
+new file mode 100644
+index 000000000000..bdb666b3da4e
+--- /dev/null
++++ b/arch/arm/include/asm/trace/exceptions.h
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM exceptions
++
++#if !defined(_TRACE_EXCEPTIONS_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_EXCEPTIONS_H
++
++#include <linux/tracepoint.h>
++#include <asm/ptrace.h>
++#include <asm/dovetail.h>
++
++#define __trace_trap(__sym)	{ __sym, #__sym }
++
++#define trace_trap_symbolic(__trapnr)				\
++	__print_symbolic(__trapnr,				\
++			__trace_trap(ARM_TRAP_ACCESS),		\
++			__trace_trap(ARM_TRAP_SECTION),		\
++			__trace_trap(ARM_TRAP_DABT),		\
++			__trace_trap(ARM_TRAP_PABT),		\
++			__trace_trap(ARM_TRAP_BREAK),		\
++			__trace_trap(ARM_TRAP_FPU),		\
++			__trace_trap(ARM_TRAP_VFP),		\
++			__trace_trap(ARM_TRAP_UNDEFINSTR),	\
++			__trace_trap(ARM_TRAP_ALIGNMENT))
++
++DECLARE_EVENT_CLASS(ARM_trap_event,
++	TP_PROTO(int trapnr, struct pt_regs *regs),
++	TP_ARGS(trapnr, regs),
++
++	TP_STRUCT__entry(
++		__field(int, trapnr)
++		__field(struct pt_regs *, regs)
++		),
++
++	TP_fast_assign(
++		__entry->trapnr = trapnr;
++		__entry->regs = regs;
++		),
++
++	TP_printk("%s mode trap: %s",
++		user_mode(__entry->regs) ? "user" : "kernel",
++		trace_trap_symbolic(__entry->trapnr))
++);
++
++DEFINE_EVENT(ARM_trap_event, ARM_trap_entry,
++	TP_PROTO(int trapnr, struct pt_regs *regs),
++	TP_ARGS(trapnr, regs)
++);
++
++DEFINE_EVENT(ARM_trap_event, ARM_trap_exit,
++	TP_PROTO(int trapnr, struct pt_regs *regs),
++	TP_ARGS(trapnr, regs)
++);
++
++#undef TRACE_INCLUDE_PATH
++#undef TRACE_INCLUDE_FILE
++#define TRACE_INCLUDE_PATH asm/trace
++#define TRACE_INCLUDE_FILE exceptions
++#endif /*  _TRACE_EXCEPTIONS_H */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
+diff --git a/arch/arm/kernel/entry-armv.S b/arch/arm/kernel/entry-armv.S
+index 8ff2ebd805ba..a8601ff88a98 100644
+--- a/arch/arm/kernel/entry-armv.S
++++ b/arch/arm/kernel/entry-armv.S
+@@ -29,6 +29,7 @@
+ 
+ #include "entry-header.S"
+ #include <asm/probes.h>
++#include <asm/dovetail.h>
+ 
+ /*
+  * Interrupt handling.
+@@ -288,6 +289,16 @@ __und_svc:
+ 	svc_entry MAX_STACK_SIZE
+ #else
+ 	svc_entry
++#endif
++#ifdef CONFIG_DOVETAIL
++	get_thread_info tsk
++	ldr	r0, [tsk, #TI_PREEMPT]		@ get preempt count
++	tst	r0, #TI_OOB_MASK		@ oob stage?
++	beq	1f
++	mov	r0, #ARM_TRAP_UNDEFINSTR
++	mov	r1, sp				@ r1 = &regs
++	bl	__oob_trap_notify
++1:
+ #endif
+ 
+ 	mov	r1, #4				@ PC correction to apply
+@@ -298,6 +309,15 @@ __und_svc:
+ 
+ __und_svc_finish:
+ 	get_thread_info tsk
++#ifdef CONFIG_DOVETAIL
++	ldr	r0, [tsk, #TI_PREEMPT]		@ get preempt count
++	tst	r0, #TI_OOB_MASK		@ oob stage?
++	beq	1f
++	mov	r0, #ARM_TRAP_UNDEFINSTR
++	mov	r1, sp				@ r1 = &regs
++	bl	__oob_trap_unwind
++1:
++#endif
+ 	ldr	r5, [sp, #S_PSR]		@ Get SVC cpsr
+ 	svc_exit r5				@ return from exception
+  UNWIND(.fnend		)
+diff --git a/arch/arm/kernel/ptrace.c b/arch/arm/kernel/ptrace.c
+index c421a899fc84..30b9ba8f62e8 100644
+--- a/arch/arm/kernel/ptrace.c
++++ b/arch/arm/kernel/ptrace.c
+@@ -205,7 +205,9 @@ void ptrace_break(struct pt_regs *regs)
+ 
+ static int break_trap(struct pt_regs *regs, unsigned int instr)
+ {
++	mark_trap_entry(ARM_TRAP_BREAK, regs);
+ 	ptrace_break(regs);
++	mark_trap_exit(ARM_TRAP_BREAK, regs);
+ 	return 0;
+ }
+ 
+diff --git a/arch/arm/mm/alignment.c b/arch/arm/mm/alignment.c
+index 6ef4d2836d62..b03ce1ded8f5 100644
+--- a/arch/arm/mm/alignment.c
++++ b/arch/arm/mm/alignment.c
+@@ -19,6 +19,7 @@
+ #include <linux/init.h>
+ #include <linux/sched/signal.h>
+ #include <linux/uaccess.h>
++#include <linux/dovetail.h>
+ 
+ #include <asm/cp15.h>
+ #include <asm/system_info.h>
+@@ -807,11 +808,13 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	u16 tinstr = 0;
+ 	int isize = 4;
+ 	int thumb2_32b = 0;
+-	int fault;
++	int fault, ret = 0;
+ 
+ 	if (interrupts_enabled(regs))
+ 		hard_local_irq_enable();
+ 
++	mark_trap_entry(ARM_TRAP_ALIGNMENT, regs);
++
+ 	instrptr = instruction_pointer(regs);
+ 
+ 	if (thumb_mode(regs)) {
+@@ -938,7 +941,7 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	if (thumb_mode(regs))
+ 		regs->ARM_cpsr = it_advance(regs->ARM_cpsr);
+ 
+-	return 0;
++	goto out;
+ 
+  bad_or_fault:
+ 	if (type == TYPE_ERROR)
+@@ -947,7 +950,7 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	 * We got a fault - fix it up, or die.
+ 	 */
+ 	do_bad_area(addr, fsr, regs);
+-	return 0;
++	goto out;
+ 
+  swp:
+ 	pr_err("Alignment trap: not handling swp instruction\n");
+@@ -961,7 +964,8 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 		isize << 1,
+ 		isize == 2 ? tinstr : instr, instrptr);
+ 	ai_skipped += 1;
+-	return 1;
++	ret = 1;
++	goto out;
+ 
+  user:
+ 	ai_user += 1;
+@@ -997,7 +1001,10 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 			set_cr(cr_no_alignment);
+ 	}
+ 
+-	return 0;
++out:
++	mark_trap_exit(ARM_TRAP_ALIGNMENT, regs);
++
++	return ret;
+ }
+ 
+ static int __init noalign_setup(char *__unused)
+diff --git a/arch/arm/mm/fault.c b/arch/arm/mm/fault.c
+index 96d1c56ed823..fd628acecd14 100644
+--- a/arch/arm/mm/fault.c
++++ b/arch/arm/mm/fault.c
+@@ -23,6 +23,9 @@
+ #include <asm/system_misc.h>
+ #include <asm/system_info.h>
+ #include <asm/tlbflush.h>
++#include <asm/dovetail.h>
++#define CREATE_TRACE_POINTS
++#include <asm/trace/exceptions.h>
+ 
+ #include "fault.h"
+ 
+@@ -36,12 +39,20 @@
+  * preempted by an out-of-band activity.
+  */
+ static inline
+-unsigned long fault_entry(struct pt_regs *regs)
++unsigned long fault_entry(int exception, struct pt_regs *regs)
+ {
+ 	unsigned long flags;
+ 
++	trace_ARM_trap_entry(exception, regs);
++
+ 	flags = hard_local_save_flags();
+ 
++	/*
++	 * The companion core must demote the current context to
++	 * in-band stage if running oob on entry.
++	 */
++	mark_trap_entry(exception, regs);
++
+ 	if (raw_irqs_disabled_flags(flags)) {
+ 		stall_inband();
+ 		trace_hardirqs_off();
+@@ -52,7 +63,9 @@ unsigned long fault_entry(struct pt_regs *regs)
+ 	return flags;
+ }
+ 
+-static inline void fault_exit(unsigned long flags)
++static inline
++void fault_exit(int exception, struct pt_regs *regs,
++		unsigned long flags)
+ {
+ 	WARN_ON_ONCE(irq_pipeline_debug() && hard_irqs_disabled());
+ 
+@@ -60,18 +73,16 @@ static inline void fault_exit(unsigned long flags)
+ 	 * We expect kentry_exit_pipelined() to clear the stall bit if
+ 	 * kentry_enter_pipelined() observed it that way.
+ 	 */
++	mark_trap_exit(exception, regs);
++	trace_ARM_trap_exit(exception, regs);
+ 	hard_local_irq_restore(flags);
+ }
+ 
+ #else	/* !CONFIG_IRQ_PIPELINE */
+ 
+-static inline
+-unsigned long fault_entry(struct pt_regs *regs)
+-{
+-	return 0;
+-}
+-
+-static inline void fault_exit(unsigned long x) { }
++#define fault_entry(__exception, __regs)  ({ 0; })
++#define fault_exit(__exception, __regs, __flags)  \
++	do { (void)(__flags); } while (0)
+ 
+ #endif	/* !CONFIG_IRQ_PIPELINE */
+ 
+@@ -147,6 +158,15 @@ void show_pte(const char *lvl, struct mm_struct *mm, unsigned long addr)
+ 	pr_cont("\n");
+ }
+ #else					/* CONFIG_MMU */
++unsigned long fault_entry(int exception, struct pt_regs *regs)
++{
++	return 0;
++}
++
++static inline void fault_exit(int exception, struct pt_regs *regs,
++			unsigned long combo)
++{ }
++
+ void show_pte(const char *lvl, struct mm_struct *mm, unsigned long addr)
+ { }
+ #endif					/* CONFIG_MMU */
+@@ -263,9 +283,9 @@ void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	 * have no context to handle this fault with.
+ 	 */
+ 	  if (user_mode(regs)) {
+-		irqflags = fault_entry(regs);
++		irqflags = fault_entry(ARM_TRAP_ACCESS, regs);
+ 		__do_user_fault(addr, fsr, SIGSEGV, SEGV_MAPERR, regs);
+-		fault_exit(irqflags);
++		fault_exit(ARM_TRAP_ACCESS, regs, irqflags);
+ 	  } else
+ 		/*
+ 		 * irq_pipeline: kernel faults are either quickly
+@@ -303,7 +323,7 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	unsigned long vm_flags = VM_ACCESS_FLAGS;
+ 	unsigned long irqflags;
+ 
+-	irqflags = fault_entry(regs);
++	irqflags = fault_entry(ARM_TRAP_ACCESS, regs);
+ 
+ 	if (kprobe_page_fault(regs, fsr))
+ 		goto out;
+@@ -424,7 +444,7 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ no_context:
+ 	__do_kernel_fault(mm, addr, fsr, regs);
+ out:
+-	fault_exit(irqflags);
++	fault_exit(ARM_TRAP_ACCESS, regs, irqflags);
+ 
+ 	return 0;
+ }
+@@ -519,9 +539,7 @@ do_translation_fault(unsigned long addr, unsigned int fsr,
+ 	return 0;
+ 
+ bad_area:
+-	irqflags = fault_entry(regs);
+ 	do_bad_area(addr, fsr, regs);
+-	fault_exit(irqflags);
+ 	return 0;
+ }
+ #else					/* CONFIG_MMU */
+@@ -543,9 +561,9 @@ do_sect_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ {
+ 	unsigned long irqflags;
+ 
+-	irqflags = fault_entry(regs);
++	irqflags = fault_entry(ARM_TRAP_SECTION, regs);
+ 	do_bad_area(addr, fsr, regs);
+-	fault_exit(irqflags);
++	fault_exit(ARM_TRAP_SECTION, regs, irqflags);
+ 	return 0;
+ }
+ #endif /* CONFIG_ARM_LPAE */
+@@ -598,7 +616,7 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
+ 		return;
+ 
+-	irqflags = fault_entry(regs);
++	irqflags = fault_entry(ARM_TRAP_DABT, regs);
+ 	pr_alert("8<--- cut here ---\n");
+ 	pr_alert("Unhandled fault: %s (0x%03x) at 0x%08lx\n",
+ 		inf->name, fsr, addr);
+@@ -606,7 +624,7 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 
+ 	arm_notify_die("", regs, inf->sig, inf->code, (void __user *)addr,
+ 		       fsr, 0);
+-	fault_exit(irqflags);
++	fault_exit(ARM_TRAP_DABT, regs, irqflags);
+ }
+ 
+ void __init
+@@ -631,13 +649,13 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
+ 	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
+ 		return;
+ 
+-	irqflags = fault_entry(regs);
++	irqflags = fault_entry(ARM_TRAP_PABT, regs);
+ 	pr_alert("Unhandled prefetch abort: %s (0x%03x) at 0x%08lx\n",
+ 		inf->name, ifsr, addr);
+ 
+ 	arm_notify_die("", regs, inf->sig, inf->code, (void __user *)addr,
+ 		       ifsr, 0);
+-	fault_exit(irqflags);
++	fault_exit(ARM_TRAP_PABT, regs, irqflags);
+ }
+ 
+ /*
+diff --git a/arch/arm/vfp/vfpmodule.c b/arch/arm/vfp/vfpmodule.c
+index 7e8773a2d99d..2139a2407136 100644
+--- a/arch/arm/vfp/vfpmodule.c
++++ b/arch/arm/vfp/vfpmodule.c
+@@ -14,6 +14,7 @@
+ #include <linux/signal.h>
+ #include <linux/sched/signal.h>
+ #include <linux/smp.h>
++#include <linux/dovetail.h>
+ #include <linux/init.h>
+ #include <linux/uaccess.h>
+ #include <linux/user.h>
+@@ -90,6 +91,7 @@ static void vfp_force_reload(unsigned int cpu, struct thread_info *thread)
+ static void vfp_thread_flush(struct thread_info *thread)
+ {
+ 	union vfp_state *vfp = &thread->vfpstate;
++	unsigned long flags;
+ 	unsigned int cpu;
+ 
+ 	/*
+@@ -100,11 +102,11 @@ static void vfp_thread_flush(struct thread_info *thread)
+ 	 * Do this first to ensure that preemption won't overwrite our
+ 	 * state saving should access to the VFP be enabled at this point.
+ 	 */
+-	cpu = get_cpu();
++	cpu = hard_get_cpu(flags);
+ 	if (vfp_current_hw_state[cpu] == vfp)
+ 		vfp_current_hw_state[cpu] = NULL;
+ 	fmxr(FPEXC, fmrx(FPEXC) & ~FPEXC_EN);
+-	put_cpu();
++	hard_put_cpu(flags);
+ 
+ 	memset(vfp, 0, sizeof(union vfp_state));
+ 
+@@ -119,11 +121,14 @@ static void vfp_thread_exit(struct thread_info *thread)
+ {
+ 	/* release case: Per-thread VFP cleanup. */
+ 	union vfp_state *vfp = &thread->vfpstate;
+-	unsigned int cpu = get_cpu();
++	unsigned long flags;
++	unsigned int cpu;
++
++	cpu = hard_get_cpu(flags);
+ 
+ 	if (vfp_current_hw_state[cpu] == vfp)
+ 		vfp_current_hw_state[cpu] = NULL;
+-	put_cpu();
++	hard_put_cpu(flags);
+ }
+ 
+ static void vfp_thread_copy(struct thread_info *thread)
+@@ -160,12 +165,14 @@ static int vfp_notifier(struct notifier_block *self, unsigned long cmd, void *v)
+ {
+ 	struct thread_info *thread = v;
+ 	u32 fpexc;
++	unsigned long flags;
+ #ifdef CONFIG_SMP
+ 	unsigned int cpu;
+ #endif
+ 
+ 	switch (cmd) {
+ 	case THREAD_NOTIFY_SWITCH:
++		flags = hard_cond_local_irq_save();
+ 		fpexc = fmrx(FPEXC);
+ 
+ #ifdef CONFIG_SMP
+@@ -185,6 +192,7 @@ static int vfp_notifier(struct notifier_block *self, unsigned long cmd, void *v)
+ 		 * old state.
+ 		 */
+ 		fmxr(FPEXC, fpexc & ~FPEXC_EN);
++		hard_cond_local_irq_restore(flags);
+ 		break;
+ 
+ 	case THREAD_NOTIFY_FLUSH:
+@@ -248,7 +256,10 @@ static void vfp_raise_exceptions(u32 exceptions, u32 inst, u32 fpscr, struct pt_
+ 
+ 	if (exceptions == VFP_EXCEPTION_ERROR) {
+ 		vfp_panic("unhandled bounce", inst);
+-		vfp_raise_sigfpe(FPE_FLTINV, regs);
++		if (mark_cond_trap_entry(ARM_TRAP_VFP, regs)) {
++			vfp_raise_sigfpe(FPE_FLTINV, regs);
++			mark_trap_exit(ARM_TRAP_VFP, regs);
++		}
+ 		return;
+ 	}
+ 
+@@ -320,10 +331,15 @@ static u32 vfp_emulate_instruction(u32 inst, u32 fpscr, struct pt_regs *regs)
+ 
+ /*
+  * Package up a bounce condition.
++ *
++ * Dovetail: always enters with hard irqs off, bh disabled if running
++ * inband. We make sure to read the fpregs we need before re-enabling
++ * hard irqs, at which point an oob task might preempt. Returns with
++ * hard irqs ON, which matches the converse toggle in vfp_support_entry().
+  */
+ static void VFP_bounce(u32 trigger, u32 fpexc, struct pt_regs *regs)
+ {
+-	u32 fpscr, orig_fpscr, fpsid, exceptions;
++	u32 fpscr, orig_fpscr, fpsid, exceptions, next_trigger = 0;
+ 
+ 	pr_debug("VFP: bounce: trigger %08x fpexc %08x\n", trigger, fpexc);
+ 
+@@ -353,6 +369,7 @@ static void VFP_bounce(u32 trigger, u32 fpexc, struct pt_regs *regs)
+ 		/*
+ 		 * Synchronous exception, emulate the trigger instruction
+ 		 */
++		hard_cond_local_irq_enable();
+ 		goto emulate;
+ 	}
+ 
+@@ -363,13 +380,28 @@ static void VFP_bounce(u32 trigger, u32 fpexc, struct pt_regs *regs)
+ 		 */
+ 		trigger = fmrx(FPINST);
+ 		regs->ARM_pc -= 4;
+-	} else if (!(fpexc & FPEXC_DEX)) {
++		if (fpexc & FPEXC_FP2V) {
++			/*
++			 * The barrier() here prevents fpinst2 being read
++			 * before the condition above.
++			 *
++			 * Dovetail: we read fpinst2 early before
++			 * re-enabling hard irqs.
++			 */
++			barrier();
++			next_trigger = fmrx(FPINST2);
++		}
++	}
++
++	hard_cond_local_irq_enable(); /* Matches converse in vfp_support_entry(). */
++
++	if (!(fpexc & (FPEXC_EX | FPEXC_DEX))) {
+ 		/*
+ 		 * Illegal combination of bits. It can be caused by an
+ 		 * unallocated VFP instruction but with FPSCR.IXE set and not
+ 		 * on VFP subarch 1.
+ 		 */
+-		 vfp_raise_exceptions(VFP_EXCEPTION_ERROR, trigger, fpscr, regs);
++		vfp_raise_exceptions(VFP_EXCEPTION_ERROR, trigger, fpscr, regs);
+ 		return;
+ 	}
+ 
+@@ -403,12 +435,7 @@ static void VFP_bounce(u32 trigger, u32 fpexc, struct pt_regs *regs)
+ 	if ((fpexc & (FPEXC_EX | FPEXC_FP2V)) != (FPEXC_EX | FPEXC_FP2V))
+ 		return;
+ 
+-	/*
+-	 * The barrier() here prevents fpinst2 being read
+-	 * before the condition above.
+-	 */
+-	barrier();
+-	trigger = fmrx(FPINST2);
++	trigger = next_trigger;
+ 
+  emulate:
+ 	exceptions = vfp_emulate_instruction(trigger, orig_fpscr, regs);
+@@ -512,9 +539,8 @@ static inline void vfp_pm_init(void) { }
+  */
+ void vfp_sync_hwstate(struct thread_info *thread)
+ {
+-	unsigned int cpu = get_cpu();
+-
+-	local_bh_disable();
++	unsigned long flags;
++	unsigned int cpu = hard_get_cpu(flags);
+ 
+ 	if (vfp_state_in_hw(cpu, thread)) {
+ 		u32 fpexc = fmrx(FPEXC);
+@@ -527,18 +553,18 @@ void vfp_sync_hwstate(struct thread_info *thread)
+ 		fmxr(FPEXC, fpexc);
+ 	}
+ 
+-	local_bh_enable();
+-	put_cpu();
++	hard_put_cpu(flags);
+ }
+ 
+ /* Ensure that the thread reloads the hardware VFP state on the next use. */
+ void vfp_flush_hwstate(struct thread_info *thread)
+ {
+-	unsigned int cpu = get_cpu();
++	unsigned long flags;
++	unsigned int cpu = hard_get_cpu(flags);
+ 
+ 	vfp_force_reload(cpu, thread);
+ 
+-	put_cpu();
++	hard_put_cpu(flags);
+ }
+ 
+ /*
+@@ -675,6 +701,7 @@ static int vfp_kmode_exception(struct pt_regs *regs, unsigned int instr)
+ static int vfp_support_entry(struct pt_regs *regs, u32 trigger)
+ {
+ 	struct thread_info *ti = current_thread_info();
++	int ret = 0;
+ 	u32 fpexc;
+ 
+ 	if (unlikely(!have_vfp))
+@@ -683,7 +710,12 @@ static int vfp_support_entry(struct pt_regs *regs, u32 trigger)
+ 	if (!user_mode(regs))
+ 		return vfp_kmode_exception(regs, trigger);
+ 
+-	local_bh_disable();
++	if (running_inband())
++		local_bh_disable();
++
++	/* Dovetail: guard against preemption from oob task. */
++	hard_cond_local_irq_disable();
++
+ 	fpexc = fmrx(FPEXC);
+ 
+ 	/*
+@@ -748,6 +780,8 @@ static int vfp_support_entry(struct pt_regs *regs, u32 trigger)
+ 		 * replay the instruction that trapped.
+ 		 */
+ 		fmxr(FPEXC, fpexc);
++
++		hard_cond_local_irq_enable();
+ 	} else {
+ 		/* Check for synchronous or asynchronous exceptions */
+ 		if (!(fpexc & (FPEXC_EX | FPEXC_DEX))) {
+@@ -762,18 +796,26 @@ static int vfp_support_entry(struct pt_regs *regs, u32 trigger)
+ 			if (!(fpscr & FPSCR_IXE)) {
+ 				if (!(fpscr & FPSCR_LENGTH_MASK)) {
+ 					pr_debug("not VFP\n");
+-					local_bh_enable();
+-					return -ENOEXEC;
++					ret = -ENOEXEC;
++					goto out;
+ 				}
+ 				fpexc |= FPEXC_DEX;
+ 			}
+ 		}
+ bounce:		regs->ARM_pc += 4;
+-		VFP_bounce(trigger, fpexc, regs);
++		VFP_bounce(trigger, fpexc, regs); /* Returns with hard irqs on. */
+ 	}
+ 
+-	local_bh_enable();
+-	return 0;
++out:
++	/*
++	 * Dovetail: we might have switched from oob to inband context
++	 * in vfp_raise_exceptions(), in which case we did not disable
++	 * bh on entry, so make sure not to spuriously restore it.
++	 */
++	if (running_inband() && softirq_count() == SOFTIRQ_DISABLE_OFFSET)
++		local_bh_enable();
++
++	return ret;
+ }
+ 
+ static struct undef_hook neon_support_hook[] = {{
+-- 
+2.43.0
+

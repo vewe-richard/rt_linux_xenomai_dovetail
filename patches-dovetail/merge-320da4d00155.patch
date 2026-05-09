@@ -1,0 +1,105 @@
+320da4d0015566505c143b267f7c8a6b818a0a23
+diff --cc drivers/base/regmap/regmap.c
+index 5bb8f05291fc,3011f7f9381b..e35875f6bee0
+--- a/drivers/base/regmap/regmap.c
++++ b/drivers/base/regmap/regmap.c
+@@@ -767,11 -754,9 +778,12 @@@ struct regmap *__regmap_init(struct dev
+  			map->can_sleep = true;
+  			lockdep_set_class_and_name(&map->mutex,
+  						   lock_key, lock_name);
+ -		}
+ +		} else {
+ +			ret = -ENXIO;
+ +			goto err_name;
+ + 		}
+  		map->lock_arg = map;
++ 		map->lock_key = lock_key;
+  	}
+  
+  	/*
+diff --cc include/linux/lockdep.h
+index cd53066a2041,919a5cb6368d..5374b57632c8
+--- a/include/linux/lockdep.h
++++ b/include/linux/lockdep.h
+@@@ -211,30 -211,29 +211,31 @@@ static inline void lockdep_init_map(str
+   * of dependencies wrong: they are either too broad (they need a class-split)
+   * or they are too narrow (they suffer from a false class-split):
+   */
+ -#define lockdep_set_class(lock, key)				\
+ -	lockdep_init_map_type(&(lock)->dep_map, #key, key, 0,	\
+ -			      (lock)->dep_map.wait_type_inner,	\
+ -			      (lock)->dep_map.wait_type_outer,	\
+ -			      (lock)->dep_map.lock_type)
+ -
+ -#define lockdep_set_class_and_name(lock, key, name)		\
+ -	lockdep_init_map_type(&(lock)->dep_map, name, key, 0,	\
+ -			      (lock)->dep_map.wait_type_inner,	\
+ -			      (lock)->dep_map.wait_type_outer,	\
+ -			      (lock)->dep_map.lock_type)
+ -
+ -#define lockdep_set_class_and_subclass(lock, key, sub)		\
+ -	lockdep_init_map_type(&(lock)->dep_map, #key, key, sub,	\
+ -			      (lock)->dep_map.wait_type_inner,	\
+ -			      (lock)->dep_map.wait_type_outer,	\
+ -			      (lock)->dep_map.lock_type)
+ +#define lockdep_set_class(lock, key)					\
+ +	lockdep_init_map_type(LOCKDEP_ALT_DEPMAP(lock), #key, key, 0,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_inner,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_outer,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->lock_type)
+ +
+ +#define lockdep_set_class_and_name(lock, key, name)			\
+ +	lockdep_init_map_type(LOCKDEP_ALT_DEPMAP(lock), name, key, 0,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_inner,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_outer,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->lock_type)
+ +
+ +#define lockdep_set_class_and_subclass(lock, key, sub)			\
+ +	lockdep_init_map_type(LOCKDEP_ALT_DEPMAP(lock), #key, key, sub,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_inner,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_outer,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->lock_type)
+  
+  #define lockdep_set_subclass(lock, sub)					\
+- 	lockdep_init_map_type(LOCKDEP_ALT_DEPMAP(lock), #lock,		\
+ -	lockdep_init_map_type(&(lock)->dep_map, (lock)->dep_map.name, (lock)->dep_map.key, sub,\
+ -			      (lock)->dep_map.wait_type_inner,		\
+ -			      (lock)->dep_map.wait_type_outer,		\
+ -			      (lock)->dep_map.lock_type)
+++	lockdep_init_map_type(LOCKDEP_ALT_DEPMAP(lock),			\
+++			LOCKDEP_ALT_DEPMAP(lock)->name,			\
+ +			LOCKDEP_ALT_DEPMAP(lock)->key, sub,		\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_inner,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->wait_type_outer,	\
+ +			LOCKDEP_ALT_DEPMAP(lock)->lock_type)
+  
+  #define lockdep_set_novalidate_class(lock) \
+  	lockdep_set_class_and_name(lock, &__lockdep_no_validate__, #lock)
+diff --cc net/packet/af_packet.c
+index 47e9aac229f8,56e3ae3b6be9..12b2bd617e05
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@@ -3433,18 -3428,17 +3433,18 @@@ static int packet_create(struct net *ne
+  	if (sock->type == SOCK_PACKET)
+  		sock->ops = &packet_ops_spkt;
+  
++ 	po = pkt_sk(sk);
++ 	err = packet_alloc_pending(po);
++ 	if (err)
++ 		goto out_sk_free;
++ 
+  	sock_init_data(sock, sk);
+  
+- 	po = pkt_sk(sk);
+  	init_completion(&po->skb_completion);
+  	sk->sk_family = PF_PACKET;
+ +	sk->sk_protocol	= protocol;
+  	po->num = proto;
+  
+- 	err = packet_alloc_pending(po);
+- 	if (err)
+- 		goto out2;
+- 
+  	packet_cached_dev_reset(po);
+  
+  	sk->sk_destruct = packet_sock_destruct;

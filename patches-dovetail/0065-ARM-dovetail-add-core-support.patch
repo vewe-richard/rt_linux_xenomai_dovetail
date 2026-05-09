@@ -1,0 +1,172 @@
+From 467a9a9bc2e005a92977894f522c8209094eaec8 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 12 May 2020 17:55:05 +0200
+Subject: [PATCH 065/171] ARM: dovetail: add core support
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/Kconfig                   |  3 +++
+ arch/arm/include/asm/dovetail.h    |  9 ++++++++
+ arch/arm/include/asm/thread_info.h |  6 ++++++
+ arch/arm/kernel/entry-armv.S       |  5 +++++
+ arch/arm/kernel/irq.c              | 34 +++++++++++++++++++++++++++++-
+ 5 files changed, 56 insertions(+), 1 deletion(-)
+ create mode 100644 arch/arm/include/asm/dovetail.h
+
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index ab9be5df4867..d3f3c86688fb 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -389,6 +389,7 @@ config ARCH_MULTI_V6_V7
+ 	bool
+ 	select MIGHT_HAVE_CACHE_L2X0
+ 	select HAVE_IRQ_PIPELINE
++	select HAVE_DOVETAIL if CPU_HAS_ASID
+ 
+ config ARCH_MULTI_CPU_AUTO
+ 	def_bool !(ARCH_MULTI_V4 || ARCH_MULTI_V4T || ARCH_MULTI_V6_V7)
+@@ -1041,6 +1042,8 @@ config SCHED_SMT
+ 	  MultiThreading at a cost of slightly increased overhead in some
+ 	  places. If unsure say N here.
+ 
++source "kernel/Kconfig.dovetail"
++
+ config HAVE_ARM_SCU
+ 	bool
+ 	help
+diff --git a/arch/arm/include/asm/dovetail.h b/arch/arm/include/asm/dovetail.h
+new file mode 100644
+index 000000000000..86e81cce967c
+--- /dev/null
++++ b/arch/arm/include/asm/dovetail.h
+@@ -0,0 +1,9 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (C) 2016 Philippe Gerum.
++ */
++#ifndef _ASM_ARM_DOVETAIL_H
++#define _ASM_ARM_DOVETAIL_H
++
++#endif /* _ASM_ARM_DOVETAIL_H */
+diff --git a/arch/arm/include/asm/thread_info.h b/arch/arm/include/asm/thread_info.h
+index 8cee313bbb33..7352084fa049 100644
+--- a/arch/arm/include/asm/thread_info.h
++++ b/arch/arm/include/asm/thread_info.h
+@@ -39,6 +39,7 @@ struct task_struct;
+ 
+ DECLARE_PER_CPU(struct task_struct *, __entry_task);
+ 
++#include <dovetail/thread_info.h>
+ #include <asm/types.h>
+ #include <asm/traps.h>
+ 
+@@ -74,6 +75,7 @@ struct thread_info {
+ #ifdef CONFIG_ARM_THUMBEE
+ 	unsigned long		thumbee_state;	/* ThumbEE Handler Base register */
+ #endif
++	struct oob_thread_state	oob_state; /* co-kernel thread state */
+ };
+ 
+ #define INIT_THREAD_INFO(tsk)						\
+@@ -157,6 +159,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define TIF_SYSCALL_TRACEPOINT	22	/* syscall tracepoint instrumentation */
+ #define TIF_SECCOMP		23	/* seccomp syscall filtering active */
+ 
++#define TIF_MAYDAY		24	/* emergency trap pending */
+ 
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+@@ -168,6 +171,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
+ #define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
+ #define _TIF_USING_IWMMXT	(1 << TIF_USING_IWMMXT)
++#define _TIF_MAYDAY		(1 << TIF_MAYDAY)
+ 
+ /* Checks for any syscall work in entry-common.S */
+ #define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+@@ -184,6 +188,8 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+  * Local (synchronous) thread flags.
+  */
+ #define _TLF_OOB		0x0001
++#define _TLF_DOVETAIL		0x0002
++#define _TLF_OFFSTAGE		0x0004
+ 
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_ARM_THREAD_INFO_H */
+diff --git a/arch/arm/kernel/entry-armv.S b/arch/arm/kernel/entry-armv.S
+index 5c4c9a4ac2ed..8ff2ebd805ba 100644
+--- a/arch/arm/kernel/entry-armv.S
++++ b/arch/arm/kernel/entry-armv.S
+@@ -41,6 +41,10 @@
+ #endif
+ 
+ 	.macro	irq_handler, from_user:req
++#ifdef CONFIG_DOVETAIL
++	mov	r0, sp
++	bl	irq_service_handler
++#else
+ 	mov	r1, sp
+ 	ldr_this_cpu r2, irq_stack_ptr, r2, r3
+ 	.if	\from_user == 0
+@@ -64,6 +68,7 @@
+ 	mov_l	r0, irq_service_handler
+ 	bl	call_with_stack
+ 1:
++#endif /* !CONFIG_DOVETAIL */
+ 	.endm
+ 
+ 	.macro	pabt_helper
+diff --git a/arch/arm/kernel/irq.c b/arch/arm/kernel/irq.c
+index b3b182849c6e..11340e9368b0 100644
+--- a/arch/arm/kernel/irq.c
++++ b/arch/arm/kernel/irq.c
+@@ -149,12 +149,44 @@ void __init init_IRQ(void)
+ }
+ 
+ #ifdef CONFIG_IRQ_PIPELINE
++
++#ifdef CONFIG_DOVETAIL
++/*
++ * When Dovetail is enabled, the companion core may switch contexts
++ * over the irq stack, therefore subsequent interrupts might be taken
++ * over sibling stack contexts. So we need a not so subtle way of
++ * figuring out whether the irq stack is already current, which cannot
++ * depend on the value of the stack pointer. Instead, we track the
++ * interrupt nesting depth for a CPU in irq_nesting.
++ */
++DEFINE_PER_CPU(int, irq_nesting);
++
+ asmlinkage int __exception_irq_entry
+ handle_arch_irq_pipelined(struct pt_regs *regs)
+ {
++	if (this_cpu_inc_return(irq_nesting) == 1) {
++		void (*handler)(void *) =
++			(typeof(handler))
++			(void (*)(void))handle_irq_pipelined;
++		call_with_stack(handler, regs, __this_cpu_read(irq_stack_ptr));
++		this_cpu_dec(irq_nesting);
++		return running_inband() && !irqs_disabled();
++	}
++
+ 	return handle_irq_pipelined(regs);
+ }
+-#endif
++
++#else /* !CONFIG_DOVETAIL*/
++
++asmlinkage int __exception_irq_entry
++handle_arch_irq_pipelined(struct pt_regs *regs)
++{
++	return handle_irq_pipelined(regs);
++}
++
++#endif /* !CONFIG_DOVETAIL*/
++
++#endif	/* CONFIG_IRQ_PIPELINE */
+ 
+ #ifdef CONFIG_SPARSE_IRQ
+ int __init arch_probe_nr_irqs(void)
+-- 
+2.43.0
+

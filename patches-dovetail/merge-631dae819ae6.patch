@@ -1,0 +1,126 @@
+631dae819ae6e187f31f94506dd39d7e9f4b46c4
+diff --cc arch/x86/entry/common.c
+index 0f2d7bc2738d,9c0b26ae5106..0220ca163a32
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@@ -152,9 -226,9 +246,10 @@@ __visible noinstr void do_int80_syscall
+  	do_syscall_32_irqs_on(regs, nr);
+  
+  	instrumentation_end();
+ +done:
+  	syscall_exit_to_user_mode(regs);
+  }
++ #endif /* !CONFIG_IA32_EMULATION */
+  
+  static noinstr bool __do_fast_syscall_32(struct pt_regs *regs)
+  {
+diff --cc arch/x86/kernel/alternative.c
+index 0e821fa24733,aae7456ece07..4196267c9585
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@@ -1696,14 -1691,12 +1706,14 @@@ void __init_or_module text_poke_early(v
+  		 * code cannot be running and speculative code-fetches are
+  		 * prevented. Just change the code.
+  		 */
+ +		flags = hard_local_irq_save();
+  		memcpy(addr, opcode, len);
+ +		hard_local_irq_restore(flags);
+  	} else {
+ -		local_irq_save(flags);
+ +		flags = hard_local_irq_save();
+  		memcpy(addr, opcode, len);
+- 		hard_local_irq_restore(flags);
+  		sync_core();
+ -		local_irq_restore(flags);
+++		hard_local_irq_restore(flags);
+  
+  		/*
+  		 * Could also do a CLFLUSH here to speed up CPU recovery; but
+diff --cc include/linux/preempt.h
+index eda83c95a306,9aa6358a1a16..6382c16a9560
+--- a/include/linux/preempt.h
++++ b/include/linux/preempt.h
+@@@ -113,14 -109,12 +119,15 @@@ static __always_inline unsigned char in
+  #define hardirq_count()	(preempt_count() & HARDIRQ_MASK)
+  #ifdef CONFIG_PREEMPT_RT
+  # define softirq_count()	(current->softirq_disable_cnt & SOFTIRQ_MASK)
++ # define irq_count()		((preempt_count() & (NMI_MASK | HARDIRQ_MASK)) | softirq_count())
+  #else
+  # define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
++ # define irq_count()		(preempt_count() & (NMI_MASK | HARDIRQ_MASK | SOFTIRQ_MASK))
+  #endif
+- #define irq_count()	(nmi_count() | hardirq_count() | softirq_count())
+  
+ +/* The current IRQ stage level: 0=inband, 1=oob */
+ +#define stage_level()	((preempt_count() & STAGE_MASK) >> STAGE_SHIFT)
+ +
+  /*
+   * Macros to retrieve the current execution context:
+   *
+diff --cc include/linux/rmap.h
+index 2a7a3cec33ec,b1fb58b435a9..3b28f72bb13a
+--- a/include/linux/rmap.h
++++ b/include/linux/rmap.h
+@@@ -261,8 -261,8 +261,8 @@@ static inline int page_try_dup_anon_rma
+  	 * guarantee the pinned page won't be randomly replaced in the
+  	 * future on write faults.
+  	 */
+- 	if (likely(!is_device_private_page(page) &&
+- 	    unlikely(page_needs_cow(vma, page))))
++ 	if (likely(!is_device_private_page(page)) &&
+ -	    unlikely(page_needs_cow_for_dma(vma, page)))
+++	    unlikely(page_needs_cow(vma, page)))
+  		return -EBUSY;
+  
+  	ClearPageAnonExclusive(page);
+diff --cc kernel/exit.c
+index 0901cbe9bf60,21a59a6e1f2e..525b355af1fe
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@@ -825,11 -824,8 +825,9 @@@ void __noreturn do_exit(long code
+  	ptrace_event(PTRACE_EVENT_EXIT, code);
+  	user_events_exit(tsk);
+  
+- 	validate_creds_for_do_exit(tsk);
+- 
+  	io_uring_files_cancel();
+  	exit_signals(tsk);  /* sets PF_EXITING */
+ +	inband_exit_notify();
+  
+  	/* sync mm's RSS info before statistics gathering */
+  	if (tsk->mm)
+diff --cc kernel/fork.c
+index 984b03cf8256,177ce7438db6..3a4129d3dfec
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@@ -1288,12 -1286,9 +1288,12 @@@ static struct mm_struct *mm_init(struc
+  #endif
+  	mm_init_uprobes_state(mm);
+  	hugetlb_count_init(mm);
+ +#ifdef CONFIG_DOVETAIL
+ +	memset(&mm->oob_state, 0, sizeof(mm->oob_state));
+ +#endif
+  
+  	if (current->mm) {
+- 		mm->flags = current->mm->flags & MMF_INIT_MASK;
++ 		mm->flags = mmf_init_flags(current->mm->flags);
+  		mm->def_flags = current->mm->def_flags & VM_INIT_DEF_MASK;
+  	} else {
+  		mm->flags = default_dump_filter;
+diff --cc kernel/sched/core.c
+index 767c1d7f4dc7,a854b71836dd..b26b9b8a3263
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@@ -6740,12 -6696,7 +6743,10 @@@ static int __sched notrace __schedule(u
+  
+  		/* Also unlocks the rq: */
+  		rq = context_switch(rq, prev, next, &rf);
+ +		if (dovetailing() && rq == NULL)
+ +			/* Task moved to the oob stage. */
+ +			return 1;
+  	} else {
+- 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
+- 
+  		rq_unpin_lock(rq, &rf);
+  		__balance_callbacks(rq);
+  		raw_spin_rq_unlock_irq(rq);

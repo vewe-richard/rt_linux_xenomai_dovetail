@@ -1,0 +1,43 @@
+From 48404c31cf7a7f954d2fffa17cf2186748e3bc48 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 3 Nov 2024 18:47:13 +0100
+Subject: [PATCH 162/171] dovetail: don't hide pipelining from uname if
+ DOVETAIL=n
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ init/Makefile           | 2 +-
+ kernel/Kconfig.dovetail | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/init/Makefile b/init/Makefile
+index 516337b8aa0f..302798aa30ca 100644
+--- a/init/Makefile
++++ b/init/Makefile
+@@ -27,7 +27,7 @@ smp-flag-$(CONFIG_SMP)			:= SMP
+ preempt-flag-$(CONFIG_PREEMPT_BUILD)	:= PREEMPT
+ preempt-flag-$(CONFIG_PREEMPT_DYNAMIC)	:= PREEMPT_DYNAMIC
+ preempt-flag-$(CONFIG_PREEMPT_RT)	:= PREEMPT_RT
+-dovetail-flag-$(CONFIG_DOVETAIL)	:= $(CONFIG_DOVETAIL_GUEST)
++dovetail-flag-$(CONFIG_IRQ_PIPELINE)	:= $(or $(CONFIG_DOVETAIL_GUEST),IRQ_PIPELINE)
+ 
+ build-version = $(or $(KBUILD_BUILD_VERSION), $(build-version-auto))
+ build-timestamp = $(or $(KBUILD_BUILD_TIMESTAMP), $(build-timestamp-auto))
+diff --git a/kernel/Kconfig.dovetail b/kernel/Kconfig.dovetail
+index 325d3f943ef5..29c46e06e435 100644
+--- a/kernel/Kconfig.dovetail
++++ b/kernel/Kconfig.dovetail
+@@ -23,8 +23,8 @@ config DOVETAIL_LEGACY_SYSCALL_RANGE
+        def_bool y
+ 
+ # The nickname of the guest companion core using Dovetail to attach to
+-# the main kernel. Advertise IRQ pipelining only if none.
++# the main kernel. Advertise mere dovetailing only if none.
+ config DOVETAIL_GUEST
+        string
+        depends on DOVETAIL
+-       default "$(shell,$(srctree)/scripts/dovetail-guest.sh 2>/dev/null || echo IRQ_PIPELINE)"
++       default "$(shell,$(srctree)/scripts/dovetail-guest.sh 2>/dev/null || echo DOVETAIL)"
+-- 
+2.43.0
+

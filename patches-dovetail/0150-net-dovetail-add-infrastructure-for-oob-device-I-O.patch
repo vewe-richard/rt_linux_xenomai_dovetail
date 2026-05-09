@@ -1,0 +1,1586 @@
+From d8ae5fa32c295361846665ec335c8d6b00b4b509 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Fri, 15 Mar 2024 15:37:39 +0100
+Subject: [PATCH 150/171] net: dovetail: add infrastructure for oob device I/O
+
+Enabling oob I/O for netdevices requires:
+
+- the extension of the page pool implementation in order to enable oob
+  access to dedicated pool of pages for buffer allocation and release
+  (PP_FLAG_PAGE_OOB). This simplifies the addition of oob support to
+  the netdevice drivers already using page pools for allocating their
+  buffers (e.g. XDP-enabled drivers normally do).
+
+- a significant rework of the Dovetail-specific skbuff handling in
+  order to support proper recycling by the companion core, depending
+  on the stage buffers are released from, and which among the in-band
+  or oob netstacks actually owns them. The gist of the changes is
+  about decoupling the information about the stage which owns the
+  buffer head (skb->oob_head set if oob) from the information about
+  the stage which owns the storage the buffer meta-data refers to
+  (skb_shinfo(skb)->flags & SKBFL_OOB_STORAGE is non-zero if the
+  storage lives in an oob-enabled page pool).
+
+- the introduction of a global pool of buffer heads which may be
+  accessed from the oob stage for allocation and release.
+
+- making __build_skb() aware of the existence of the oob buffer pool,
+  so that a new head from the latter when the caller runs oob, which
+  eventually makes this routine oob-capable.
+
+- teaching a critical portion of the NAPI how to deal with the
+  out-of-band execution stage, so that fewer changes to NIC drivers
+  are required for enabling oob traffic.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/dovetail/netdevice.h  |  11 ++
+ include/linux/net.h           |  10 ++
+ include/linux/netdevice.h     | 119 +++++++++++---------
+ include/linux/skbuff.h        | 197 ++++++++++++++++++++------------
+ include/net/page_pool/types.h |  28 ++++-
+ net/Kconfig                   |   5 +
+ net/core/dev.c                | 200 ++++++++++++++++++++++-----------
+ net/core/gro.c                |   7 ++
+ net/core/page_pool.c          |  93 ++++++++++++++-
+ net/core/skbuff.c             | 206 ++++++++++++++++++----------------
+ net/core/sysctl_net_core.c    |  11 ++
+ net/ipv4/route.c              |   2 +-
+ net/socket.c                  |   2 +-
+ 13 files changed, 598 insertions(+), 293 deletions(-)
+
+diff --git a/include/dovetail/netdevice.h b/include/dovetail/netdevice.h
+index 5bd975ccd5b3..2939e017bbe2 100644
+--- a/include/dovetail/netdevice.h
++++ b/include/dovetail/netdevice.h
+@@ -9,4 +9,15 @@
+ struct oob_netdev_state {
+ };
+ 
++struct oob_netqueue_state {
++};
++
++static inline void netqueue_init_oob(struct oob_netqueue_state *qs)
++{
++}
++
++static inline void netqueue_destroy_oob(struct oob_netqueue_state *qs)
++{
++}
++
+ #endif /* !_DOVETAIL_NETDEVICE_H */
+diff --git a/include/linux/net.h b/include/linux/net.h
+index 78c4abf716e0..5607d77db512 100644
+--- a/include/linux/net.h
++++ b/include/linux/net.h
+@@ -324,6 +324,16 @@ static inline bool sendpage_ok(struct page *page)
+ 	return !PageSlab(page) && page_count(page) >= 1;
+ }
+ 
++static inline bool net_running_oob(void)
++{
++	/*
++	 * Ensure depending code blocks are compiled out if
++	 * CONFIG_NET_OOB is disabled even if CONFIG_DOVETAIL is
++	 * enabled.
++	 */
++	return IS_ENABLED(CONFIG_NET_OOB) && running_oob();
++}
++
+ int kernel_sendmsg(struct socket *sock, struct msghdr *msg, struct kvec *vec,
+ 		   size_t num, size_t len);
+ int kernel_sendmsg_locked(struct sock *sk, struct msghdr *msg,
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index 854a66cb27ef..a13390e4d380 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -334,6 +334,7 @@ enum netdev_state_t {
+ 	__LINK_STATE_LINKWATCH_PENDING,
+ 	__LINK_STATE_DORMANT,
+ 	__LINK_STATE_TESTING,
++	__LINK_STATE_OOB_PORT,
+ 	__LINK_STATE_OOB,
+ };
+ 
+@@ -483,6 +484,7 @@ static inline bool napi_prefer_busy_poll(struct napi_struct *n)
+ }
+ 
+ bool napi_schedule_prep(struct napi_struct *n);
++bool napi_schedule_unprep(struct napi_struct *n);
+ 
+ /**
+  *	napi_schedule - schedule NAPI poll
+@@ -657,6 +659,8 @@ struct netdev_queue {
+ 
+ 	unsigned long		state;
+ 
++	struct oob_netqueue_state oob;
++
+ #ifdef CONFIG_BQL
+ 	struct dql		dql;
+ #endif
+@@ -1408,18 +1412,13 @@ struct netdev_net_notifier {
+  *			   struct kernel_hwtstamp_config *kernel_config,
+  *			   struct netlink_ext_ack *extack);
+  *	Change the hardware timestamping parameters for NIC device.
+- * struct sk_buff *(*ndo_alloc_oob_skb)(struct net_device *dev,
+- * 					dma_addr_t *dma_addr);
+- *	Allocate a buffer for out-of-band I/O. The memory must be immediately
+- *	DMA-suitable, living in the linear kernel address space. i.e. no highmem.
+- *	This handler must be provided if IFF_OOB_CAPABLE is set in the out-of-band
+- *	context flags.
+- * void	(*ndo_free_oob_skb)(struct net_device *dev,
+- *			    struct sk_buff *skb,
+- *			    dma_addr_t dma_addr);
+- *	Free a buffer previously allocated from ndo_alloc_oob_skb() exclusively.
+- *	This handler must be provided if IFF_OOB_CAPABLE is set in the out-of-band
+- *	context flags.
++ * void	(*ndo_enable_oob)(struct net_device *dev);
++ *	Turn on out-of-band I/O handling. On return from this handler, the device
++ *	must be prepared to handle RX/TX packets from the out-of-band stage. This
++ *	handler is optional.
++ * void	(*ndo_disable_oob)(struct net_device *dev);
++ *	Turn off out-of-band I/O handling, reverting the effect of ndo_enable_oob().
++ *	This handler is optional.
+  */
+ struct net_device_ops {
+ 	int			(*ndo_init)(struct net_device *dev);
+@@ -1660,11 +1659,8 @@ struct net_device_ops {
+ 						    struct kernel_hwtstamp_config *kernel_config,
+ 						    struct netlink_ext_ack *extack);
+ #ifdef CONFIG_NET_OOB
+-	struct sk_buff *	(*ndo_alloc_oob_skb)(struct net_device *dev,
+-						     dma_addr_t *dma_addr);
+-	void			(*ndo_free_oob_skb)(struct net_device *dev,
+-						    struct sk_buff *skb,
+-						    dma_addr_t dma_addr);
++	int			(*ndo_enable_oob)(struct net_device *dev);
++	void			(*ndo_disable_oob)(struct net_device *dev);
+ #endif
+ };
+ 
+@@ -1720,7 +1716,6 @@ struct net_device_ops {
+  *	ndo_hwtstamp_set() for all timestamp requests regardless of source,
+  *	even if those aren't HWTSTAMP_SOURCE_NETDEV.
+  * @IFF_OOB_CAPABLE: device supports direct out-of-band I/O operations.
+- * @IFF_OOB_PORT: device is an active out-of-band port.
+  */
+ enum netdev_priv_flags {
+ 	IFF_802_1Q_VLAN			= 1<<0,
+@@ -1793,7 +1788,6 @@ enum netdev_priv_flags {
+ #define IFF_L3MDEV_RX_HANDLER		IFF_L3MDEV_RX_HANDLER
+ #define IFF_TX_SKB_NO_LINEAR		IFF_TX_SKB_NO_LINEAR
+ #define IFF_OOB_CAPABLE			IFF_OOB_CAPABLE
+-#define IFF_OOB_PORT			IFF_OOB_PORT
+ 
+ /* Specifies the type of the struct net_device::ml_priv pointer */
+ enum netdev_ml_priv_type {
+@@ -3253,6 +3247,11 @@ struct softnet_data {
+ 
+ #ifdef CONFIG_NET_FLOW_LIMIT
+ 	struct sd_flow_limit __rcu *flow_limit;
++#endif
++#ifdef CONFIG_NET_OOB
++	struct list_head	inband_rx_list; /* Inband skbs received oob */
++	hard_spinlock_t		inband_rx_lock;
++	struct irq_work		inband_rx_work;
+ #endif
+ 	struct Qdisc		*output_queue;
+ 	struct Qdisc		**output_queue_tailp;
+@@ -4328,14 +4327,19 @@ void netif_device_attach(struct net_device *dev);
+ 
+ #ifdef CONFIG_NET_OOB
+ 
++static inline bool netdev_is_oob_capable(struct net_device *dev)
++{
++	return !!(dev->priv_flags & IFF_OOB_CAPABLE);
++}
++
+ bool netif_receive_oob(struct sk_buff *skb);
+ 
+ /**
+- *	netif_oob_diversion - is I/O traffic diverted for out-of-band handling.
++ *	netif_oob_diversion - is the ingress traffic diverted for out-of-band handling?
+  *	@dev: network device
+  *
+- * Check if the RX/TX packets are currently diverted for out-of-band
+- * handling by a companion kernel.
++ * Check if the RX packets are currently diverted to a companion
++ * kernel for out-of-band handling.
+  */
+ static inline bool netif_oob_diversion(const struct net_device *dev)
+ {
+@@ -4344,51 +4348,58 @@ static inline bool netif_oob_diversion(const struct net_device *dev)
+ 
+ static inline void netif_enable_oob_diversion(struct net_device *dev)
+ {
+-	return set_bit(__LINK_STATE_OOB, &dev->state);
++	const struct net_device_ops *ops = dev->netdev_ops;
++
++	if (ops->ndo_enable_oob)
++		ops->ndo_enable_oob(dev);
++
++	set_bit(__LINK_STATE_OOB, &dev->state);
+ }
+ 
+ static inline void netif_disable_oob_diversion(struct net_device *dev)
+ {
++	const struct net_device_ops *ops = dev->netdev_ops;
++
+ 	clear_bit(__LINK_STATE_OOB, &dev->state);
+ 	smp_mb__after_atomic();
+-}
+-
+-int netif_xmit_oob(struct sk_buff *skb);
+-
+-static inline bool netdev_is_oob_capable(struct net_device *dev)
+-{
+-	return !!(dev->priv_flags & IFF_OOB_CAPABLE);
+-}
+ 
+-static inline void netdev_enable_oob_port(struct net_device *dev)
+-{
+-	dev->priv_flags |= IFF_OOB_PORT;
++	if (ops->ndo_disable_oob)
++		ops->ndo_disable_oob(dev);
+ }
+ 
+-static inline void netdev_disable_oob_port(struct net_device *dev)
++/**
++ *	netif_oob_port - is the interface an active oob port?
++ *	@dev: network device
++ *
++ * Check whether the interface acts as a virtual port for handling oob
++ * traffic.
++ */
++static inline bool netif_oob_port(struct net_device *dev)
+ {
+-	dev->priv_flags &= ~IFF_OOB_PORT;
++	return test_bit(__LINK_STATE_OOB_PORT, &dev->state);
+ }
+ 
+-static inline bool netdev_is_oob_port(struct net_device *dev)
++static inline void netif_enable_oob_port(struct net_device *dev)
+ {
+-	return !!(dev->priv_flags & IFF_OOB_PORT);
++	set_bit(__LINK_STATE_OOB_PORT, &dev->state);
+ }
+ 
+-static inline struct sk_buff *netdev_alloc_oob_skb(struct net_device *dev,
+-						   dma_addr_t *dma_addr)
++static inline void netif_disable_oob_port(struct net_device *dev)
+ {
+-	return dev->netdev_ops->ndo_alloc_oob_skb(dev, dma_addr);
++	clear_bit(__LINK_STATE_OOB_PORT, &dev->state);
++	smp_mb__after_atomic();
+ }
+ 
+-static inline void netdev_free_oob_skb(struct net_device *dev,
+-				       struct sk_buff *skb,
+-				       dma_addr_t dma_addr)
+-{
+-	dev->netdev_ops->ndo_free_oob_skb(dev, skb, dma_addr);
+-}
++/* Out-of-band hooks implemented by the companion core. */
++void napi_schedule_oob(struct napi_struct *n);
++void napi_complete_oob(struct napi_struct *n);
++bool netif_deliver_oob(struct sk_buff *skb);
++int netif_xmit_oob(struct sk_buff *skb);
++void netif_tx_lock_oob(struct netdev_queue *txq);
++void netif_tx_unlock_oob(struct netdev_queue *txq);
++void process_inband_tx_backlog(struct softnet_data *sd);
+ 
+-#else
++#else  /* !CONFIG_NET_OOB */
+ 
+ static inline bool netif_receive_oob(struct sk_buff *skb)
+ {
+@@ -4400,25 +4411,25 @@ static inline bool netif_oob_diversion(const struct net_device *dev)
+ 	return false;
+ }
+ 
+-static inline bool netdev_is_oob_capable(struct net_device *dev)
++static inline bool netif_oob_port(struct net_device *dev)
+ {
+ 	return false;
+ }
+ 
+-static inline void netdev_enable_oob_port(struct net_device *dev)
++static inline bool netdev_is_oob_capable(struct net_device *dev)
+ {
++	return false;
+ }
+ 
+-static inline void netdev_disable_oob_port(struct net_device *dev)
++static inline void netif_tx_lock_oob(struct netdev_queue *txq)
+ {
+ }
+ 
+-static inline bool netdev_is_oob_port(struct net_device *dev)
++static inline void netif_tx_unlock_oob(struct netdev_queue *txq)
+ {
+-	return false;
+ }
+ 
+-#endif
++#endif  /* !CONFIG_NET_OOB */
+ 
+ /*
+  * Network interface message level settings
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 9e5a9a8fcc70..9f47761320a7 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -516,6 +516,9 @@ enum {
+ 	 * use frags only up until ubuf_info is released
+ 	 */
+ 	SKBFL_MANAGED_FRAG_REFS = BIT(4),
++
++	/* data lives into an oob-enabled storage. */
++	SKBFL_OOB_STORAGE = BIT(5),
+ };
+ 
+ #define SKBFL_ZEROCOPY_FRAG	(SKBFL_ZEROCOPY_ENABLE | SKBFL_SHARED_FRAG)
+@@ -914,14 +917,12 @@ struct sk_buff {
+ 				head_frag:1,
+ 				pfmemalloc:1,
+ 				pp_recycle:1; /* page_pool recycle indicator */
++#ifdef CONFIG_NET_OOB
++	__u8			oob_head:1;
++#endif
+ #ifdef CONFIG_SKB_EXTENSIONS
+ 	__u8			active_extensions;
+ #endif
+-#ifdef CONFIG_NET_OOB
+-	__u8			oob:1;
+-	__u8			oob_clone:1;
+-	__u8			oob_cloned:1;
+-#endif
+ 
+ 	/* Fields enclosed in headers group are copied
+ 	 * using a single memcpy() in __copy_skb_header()
+@@ -1271,70 +1272,6 @@ struct sk_buff *build_skb_around(struct sk_buff *skb,
+ 
+ void skb_attempt_defer_free(struct sk_buff *skb);
+ 
+-#ifdef CONFIG_NET_OOB
+-
+-static inline void __skb_oob_copy(struct sk_buff *new,
+-				const struct sk_buff *old)
+-{
+-	new->oob = old->oob;
+-	new->oob_clone = old->oob_clone;
+-	new->oob_cloned = old->oob_cloned;
+-}
+-
+-static inline bool skb_is_oob(const struct sk_buff *skb)
+-{
+-	return skb->oob;
+-}
+-
+-static inline bool skb_is_oob_clone(const struct sk_buff *skb)
+-{
+-	return skb->oob_clone;
+-}
+-
+-static inline bool skb_has_oob_clone(const struct sk_buff *skb)
+-{
+-	return skb->oob_cloned;
+-}
+-
+-struct sk_buff *__netdev_alloc_oob_skb(struct net_device *dev,
+-				size_t len, size_t headroom,
+-				gfp_t gfp_mask);
+-void __netdev_free_oob_skb(struct net_device *dev, struct sk_buff *skb);
+-void netdev_reset_oob_skb(struct net_device *dev, struct sk_buff *skb,
+-			size_t headroom);
+-struct sk_buff *skb_alloc_oob_head(gfp_t gfp_mask);
+-void skb_morph_oob_skb(struct sk_buff *n, struct sk_buff *skb);
+-bool skb_release_oob_skb(struct sk_buff *skb, int *dref);
+-
+-static inline bool recycle_oob_skb(struct sk_buff *skb)
+-{
+-	bool skb_oob_recycle(struct sk_buff *skb);
+-
+-	if (!skb->oob)
+-		return false;
+-
+-	return skb_oob_recycle(skb);
+-}
+-
+-#else  /* !CONFIG_NET_OOB */
+-
+-static inline void __skb_oob_copy(struct sk_buff *new,
+-				const struct sk_buff *old)
+-{
+-}
+-
+-static inline bool skb_is_oob(const struct sk_buff *skb)
+-{
+-	return false;
+-}
+-
+-static inline bool recycle_oob_skb(struct sk_buff *skb)
+-{
+-	return false;
+-}
+-
+-#endif	/* !CONFIG_NET_OOB */
+-
+ struct sk_buff *napi_build_skb(void *data, unsigned int frag_size);
+ struct sk_buff *slab_build_skb(void *data);
+ 
+@@ -5164,5 +5101,127 @@ static inline void skb_mark_for_recycle(struct sk_buff *skb)
+ ssize_t skb_splice_from_iter(struct sk_buff *skb, struct iov_iter *iter,
+ 			     ssize_t maxsize, gfp_t gfp);
+ 
++#ifdef CONFIG_NET_OOB
++
++extern unsigned int sysctl_max_oob_skb;
++
++struct skbuff_oob_pool {
++	struct list_head pool;
++	hard_spinlock_t lock;
++};
++
++struct sk_buff *get_oob_skb(void);
++
++void put_oob_skb(struct sk_buff *skb);
++
++/**
++ * skb_is_oob - Whether the buffer was allocated from the oob
++ * pool. Caution: this is distinct from the skb conveying oob storage,
++ * see skb_has_oob_storage().
++ */
++static inline bool skb_is_oob(const struct sk_buff *skb)
++{
++	return skb->oob_head;
++}
++
++static inline void skb_mark_oob(struct sk_buff *skb)
++{
++	skb->oob_head = 1;
++}
++
++/**
++ * skb_has_oob_storage - Whether the skb data lives in an oob-enabled
++ * page pool.
++ */
++static inline bool skb_has_oob_storage(const struct sk_buff *skb)
++{
++	return skb_shinfo(skb)->flags & SKBFL_OOB_STORAGE;
++}
++
++static inline void skb_mark_oob_storage(struct sk_buff *skb)
++{
++	skb_shinfo(skb)->flags |= SKBFL_OOB_STORAGE;
++}
++
++static inline dma_addr_t skb_oob_storage_addr(const struct sk_buff *skb)
++{
++	if (!skb->head || !skb_has_oob_storage(skb) || !skb->pp_recycle)
++		return DMA_MAPPING_ERROR;
++
++	return page_pool_get_dma_addr(virt_to_page(skb->head));
++}
++
++bool recycle_skb_oob(struct sk_buff *skb);
++void free_skb_oob(struct sk_buff *skb);
++void finalize_skb_inband(struct sk_buff *skb);
++
++/**
++ *	__skb_inband_clone - In-band specific setup for skbs for a
++ *	newly allocated clone head. Other allocation places don't need
++ *	that because they are memset-zeroed from skb to &skb->end
++ *	before building the buffer around a data storage area.
++ */
++static inline void __skb_inband_clone(struct sk_buff *skb)
++{
++	skb->oob_head = 0;
++}
++
++/**
++ *	__skb_oob_free_head - Called from the in-band net core after
++ *      the last reference to the buffer (->users) was dropped, and
++ *      any (shared) data was unref'ed (and possibly freed). By
++ *      construction, this is only called for buffers which refer(red)
++ *      to non-oob storage. Out-of-band allocated buffers which also
++ *      convey out-of-band acessible storage must flow through
++ *      free_skb_oob() instead.
++ */
++static inline bool __skb_oob_free_head(struct sk_buff *skb)
++{
++	if (skb_is_oob(skb)) {
++		put_oob_skb(skb);
++		return true;
++	}
++
++	return false;
++}
++
++#else  /* !CONFIG_NET_OOB */
++
++static inline bool skb_is_oob(const struct sk_buff *skb)
++{
++	return false;
++}
++
++static inline void __skb_inband_clone(struct sk_buff *skb)
++{
++}
++
++static inline bool __skb_oob_free_head(struct sk_buff *skb)
++{
++	return false;
++}
++
++static inline bool skb_has_oob_storage(const struct sk_buff *skb)
++{
++	return false;
++}
++
++static inline dma_addr_t skb_oob_storage_addr(const struct sk_buff *skb)
++{
++	return DMA_MAPPING_ERROR;
++}
++
++static inline bool recycle_skb_oob(struct sk_buff *skb)
++{
++	return false;
++}
++
++static inline struct sk_buff *get_oob_skb(void)
++{
++	return NULL;
++}
++
++#endif	/* !CONFIG_NET_OOB */
++
+ #endif	/* __KERNEL__ */
+ #endif	/* _LINUX_SKBUFF_H */
+diff --git a/include/net/page_pool/types.h b/include/net/page_pool/types.h
+index 887e7946a597..0cf7611f1a5f 100644
+--- a/include/net/page_pool/types.h
++++ b/include/net/page_pool/types.h
+@@ -18,9 +18,11 @@
+ 					* device driver responsibility
+ 					*/
+ #define PP_FLAG_PAGE_FRAG	BIT(2) /* for page frag feature */
++#define PP_FLAG_PAGE_OOB	BIT(3) /* Enable access from the oob stage (Dovetail) */
+ #define PP_FLAG_ALL		(PP_FLAG_DMA_MAP |\
+ 				 PP_FLAG_DMA_SYNC_DEV |\
+-				 PP_FLAG_PAGE_FRAG)
++				 PP_FLAG_PAGE_FRAG |\
++				 PP_FLAG_PAGE_OOB)
+ 
+ /*
+  * Fast allocation side cache array/stack
+@@ -36,12 +38,24 @@
+  * cache is already full (or partly full) then the XDP_DROP recycles
+  * would have to take a slower code path.
+  */
+-#define PP_ALLOC_CACHE_SIZE	128
+-#define PP_ALLOC_CACHE_REFILL	64
++#ifdef CONFIG_PAGE_POOL_OOB
++#define PP_ALLOC_CACHE_SIZE(__pool)	((__pool)->p.pool_size)
++#define PP_ALLOC_CACHE_REFILL(__pool)	PP_ALLOC_CACHE_SIZE(__pool)
+ struct pp_alloc_cache {
+ 	u32 count;
+-	struct page *cache[PP_ALLOC_CACHE_SIZE];
++	struct page **cache;
++	hard_spinlock_t oob_lock;
+ };
++#else	/* !CONFIG_PAGE_POOL_OOB */
++#define __PP_ALLOC_CACHE_SIZE	128
++#define __PP_ALLOC_CACHE_REFILL	64
++#define PP_ALLOC_CACHE_SIZE(__pool)	({ (void)__pool; __PP_ALLOC_CACHE_SIZE; })
++#define PP_ALLOC_CACHE_REFILL(__pool)	({ (void)__pool; __PP_ALLOC_CACHE_REFILL; })
++struct pp_alloc_cache {
++	u32 count;
++	struct page *cache[__PP_ALLOC_CACHE_SIZE];
++};
++#endif	/* !CONFIG_PAGE_POOL_OOB */
+ 
+ /**
+  * struct page_pool_params - page pool parameters
+@@ -196,6 +210,12 @@ void page_pool_use_xdp_mem(struct page_pool *pool, void (*disconnect)(void *),
+ 			   struct xdp_mem_info *mem);
+ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
+ 			     int count);
++
++static inline bool page_pool_is_oob(struct page_pool *pool)
++{
++	return IS_ENABLED(CONFIG_PAGE_POOL_OOB) &&
++		pool->p.flags & PP_FLAG_PAGE_OOB;
++}
+ #else
+ static inline void page_pool_unlink_napi(struct page_pool *pool)
+ {
+diff --git a/net/Kconfig b/net/Kconfig
+index 9faadf82fc9e..22309a4d0742 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -65,6 +65,8 @@ config SKB_EXTENSIONS
+ 
+ config NET_OOB
+ 	bool
++	depends on DOVETAIL
++	select PAGE_POOL_OOB
+ 
+ menu "Networking options"
+ 
+@@ -472,6 +474,9 @@ config NET_DEVLINK
+ config PAGE_POOL
+ 	bool
+ 
++config PAGE_POOL_OOB
++	def_bool n
++
+ config PAGE_POOL_STATS
+ 	default n
+ 	bool "Page pool stats"
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 636a081f2e34..9079c938e503 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -3180,11 +3180,11 @@ void dev_kfree_skb_irq_reason(struct sk_buff *skb, enum skb_drop_reason reason)
+ 	} else if (likely(!refcount_dec_and_test(&skb->users))) {
+ 		return;
+ 	}
++	get_kfree_skb_cb(skb)->reason = reason;
+ 
+-	if (recycle_oob_skb(skb))
++	if (recycle_skb_oob(skb))
+ 		return;
+ 
+-	get_kfree_skb_cb(skb)->reason = reason;
+ 	local_irq_save(flags);
+ 	skb->next = __this_cpu_read(softnet_data.completion_queue);
+ 	__this_cpu_write(softnet_data.completion_queue, skb);
+@@ -3195,7 +3195,7 @@ EXPORT_SYMBOL(dev_kfree_skb_irq_reason);
+ 
+ void dev_kfree_skb_any_reason(struct sk_buff *skb, enum skb_drop_reason reason)
+ {
+-	if (in_hardirq() || irqs_disabled())
++	if (running_oob() || in_hardirq() || irqs_disabled())
+ 		dev_kfree_skb_irq_reason(skb, reason);
+ 	else
+ 		kfree_skb_reason(skb, reason);
+@@ -3572,12 +3572,7 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
+ 	unsigned int len;
+ 	int rc;
+ 
+-	/*
+-	 * Clone-relay outgoing packet to listening taps. Network taps
+-	 * interested in out-of-band traffic should be handled by the
+-	 * companion core.
+-	 */
+-	if (dev_nit_active(dev) && !skb_is_oob(skb))
++	if (dev_nit_active(dev))
+ 		dev_queue_xmit_nit(skb, dev);
+ 
+ 	len = skb->len;
+@@ -5066,7 +5061,9 @@ EXPORT_SYMBOL_GPL(do_xdp_generic);
+ 
+ #ifdef CONFIG_NET_OOB
+ 
+-__weak bool netif_oob_deliver(struct sk_buff *skb)
++static void _netif_receive_skb_list(struct list_head *head);
++
++__weak bool netif_deliver_oob(struct sk_buff *skb)
+ {
+ 	return false;
+ }
+@@ -5078,44 +5075,71 @@ __weak int netif_xmit_oob(struct sk_buff *skb)
+ 
+ bool netif_receive_oob(struct sk_buff *skb)
+ {
++	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+ 	struct net_device *dev = skb->dev;
++	unsigned long flags;
++	bool kick_softirq;
+ 
+-	if (dev && netif_oob_diversion(dev))
+-		return netif_oob_deliver(skb);
++	/*
++	 * If the interface has oob diversion enabled, attempt to
++	 * deliver the incoming packet to the oob netstack. If the
++	 * packet is not picked, then decide whether we should leave
++	 * it to the in-band caller, or defer it to the RX softirq if
++	 * currently running oob.
++	 */
++	if (dev && netif_oob_diversion(dev)) {
++		if (netif_deliver_oob(skb))
++			return true;
++		if (net_running_oob()) {
++			raw_spin_lock_irqsave(&sd->inband_rx_lock, flags);
++			kick_softirq = list_empty(&sd->inband_rx_list);
++			list_add(&skb->list, &sd->inband_rx_list);
++			raw_spin_unlock_irqrestore(&sd->inband_rx_lock, flags);
++			if (kick_softirq)
++				irq_work_queue(&sd->inband_rx_work);
++			return true;
++		}
++	}
+ 
+-	return false;
++	return false;	     /* Not handled, caller should pick it. */
+ }
+ 
+ static bool netif_receive_oob_list(struct list_head *head)
+ {
+ 	struct sk_buff *skb, *next;
+-	struct net_device *dev;
+ 
+-	dev = list_first_entry(head, struct sk_buff, list)->dev;
+-	if (!dev || !netif_oob_diversion(dev))
+-		return false;
+-
+-	/* Callee dequeues every skb it consumes. */
+ 	list_for_each_entry_safe(skb, next, head, list)
+-		netif_oob_deliver(skb);
++		netif_receive_oob(skb);
+ 
+ 	return list_empty(head);
+ }
+ 
+-__weak void netif_oob_run(struct net_device *dev)
+-{ }
+-
+-static void napi_complete_oob(struct napi_struct *n)
++static void process_inband_rx_backlog(struct softnet_data *sd)
+ {
+-	struct net_device *dev = n->dev;
++	unsigned long flags;
++	LIST_HEAD(list);
+ 
+-	if (netif_oob_diversion(dev))
+-		netif_oob_run(dev);
++	raw_spin_lock_irqsave(&sd->inband_rx_lock, flags);
++	list_splice_init(&sd->inband_rx_list, &list);
++	raw_spin_unlock_irqrestore(&sd->inband_rx_lock, flags);
++	if (!list_empty(&list))
++		_netif_receive_skb_list(&list);
+ }
+ 
+-__weak void skb_inband_xmit_backlog(void)
++__weak void napi_schedule_oob(struct napi_struct *n)
+ { }
+ 
++__weak void napi_complete_oob(struct napi_struct *n)
++{ }
++
++__weak void process_inband_tx_backlog(struct softnet_data *sd)
++{ }
++
++static void kick_rx_inband(struct irq_work *irq_work)
++{
++	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
++}
++
+ #else
+ 
+ static inline bool netif_receive_oob_list(struct list_head *head)
+@@ -5123,10 +5147,16 @@ static inline bool netif_receive_oob_list(struct list_head *head)
+ 	return false;
+ }
+ 
++static inline void napi_schedule_oob(struct napi_struct *n)
++{ }
++
+ static inline void napi_complete_oob(struct napi_struct *n)
+ { }
+ 
+-static inline void skb_inband_xmit_backlog(void)
++static inline void process_inband_tx_backlog(struct softnet_data *sd)
++{ }
++
++static void process_inband_rx_backlog(struct softnet_data *sd)
+ { }
+ 
+ #endif
+@@ -5223,7 +5253,7 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
+ {
+ 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+ 
+-	skb_inband_xmit_backlog();
++	process_inband_tx_backlog(sd);
+ 
+ 	if (sd->completion_queue) {
+ 		struct sk_buff *clist;
+@@ -5899,6 +5929,18 @@ int netif_receive_skb(struct sk_buff *skb)
+ }
+ EXPORT_SYMBOL(netif_receive_skb);
+ 
++static void _netif_receive_skb_list(struct list_head *head)
++{
++	struct sk_buff *skb;
++
++	if (trace_netif_receive_skb_list_entry_enabled()) {
++		list_for_each_entry(skb, head, list)
++			trace_netif_receive_skb_list_entry(skb);
++	}
++	netif_receive_skb_list_internal(head);
++	trace_netif_receive_skb_list_exit(0);
++}
++
+ /**
+  *	netif_receive_skb_list - process many receive buffers from network
+  *	@head: list of skbs to process.
+@@ -5911,18 +5953,11 @@ EXPORT_SYMBOL(netif_receive_skb);
+  */
+ void netif_receive_skb_list(struct list_head *head)
+ {
+-	struct sk_buff *skb;
+-
+ 	if (list_empty(head))
+ 		return;
+ 	if (netif_receive_oob_list(head))
+ 		return;
+-	if (trace_netif_receive_skb_list_entry_enabled()) {
+-		list_for_each_entry(skb, head, list)
+-			trace_netif_receive_skb_list_entry(skb);
+-	}
+-	netif_receive_skb_list_internal(head);
+-	trace_netif_receive_skb_list_exit(0);
++	_netif_receive_skb_list(head);
+ }
+ EXPORT_SYMBOL(netif_receive_skb_list);
+ 
+@@ -6113,14 +6148,20 @@ static int process_backlog(struct napi_struct *napi, int quota)
+  *
+  * The entry's receive function will be scheduled to run.
+  * Consider using __napi_schedule_irqoff() if hard irqs are masked.
++ *
++ * Dovetail: may be called from the out-of-band stage.
+  */
+ void __napi_schedule(struct napi_struct *n)
+ {
+ 	unsigned long flags;
+ 
+-	local_irq_save(flags);
+-	____napi_schedule(this_cpu_ptr(&softnet_data), n);
+-	local_irq_restore(flags);
++	if (net_running_oob()) {
++		napi_schedule_oob(n);
++	} else {
++		local_irq_save(flags);
++		____napi_schedule(this_cpu_ptr(&softnet_data), n);
++		local_irq_restore(flags);
++	}
+ }
+ EXPORT_SYMBOL(__napi_schedule);
+ 
+@@ -6132,6 +6173,8 @@ EXPORT_SYMBOL(__napi_schedule);
+  * it as running.  This is used as a condition variable to
+  * insure only one NAPI poll instance runs.  We also make
+  * sure there is no pending NAPI disable.
++ *
++ * Dovetail: may be called from the out-of-band stage.
+  */
+ bool napi_schedule_prep(struct napi_struct *n)
+ {
+@@ -6168,19 +6211,53 @@ EXPORT_SYMBOL(napi_schedule_prep);
+  */
+ void __napi_schedule_irqoff(struct napi_struct *n)
+ {
+-	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
++	if (net_running_oob())
++		napi_schedule_oob(n);
++	else if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+ 		____napi_schedule(this_cpu_ptr(&softnet_data), n);
+ 	else
+ 		__napi_schedule(n);
+ }
+ EXPORT_SYMBOL(__napi_schedule_irqoff);
+ 
++bool napi_schedule_unprep(struct napi_struct *n)
++{
++	unsigned long val, new;
++
++	val = READ_ONCE(n->state);
++	do {
++		WARN_ON_ONCE(!(val & NAPIF_STATE_SCHED));
++
++		new = val & ~(NAPIF_STATE_MISSED | NAPIF_STATE_SCHED |
++			      NAPIF_STATE_SCHED_THREADED |
++			      NAPIF_STATE_PREFER_BUSY_POLL);
++
++		/* If STATE_MISSED was set, leave STATE_SCHED set,
++		 * because we will call napi->poll() one more time.
++		 * This C code was suggested by Alexander Duyck to help gcc.
++		 */
++		new |= (val & NAPIF_STATE_MISSED) / NAPIF_STATE_MISSED *
++						    NAPIF_STATE_SCHED;
++	} while (!try_cmpxchg(&n->state, &val, new));
++
++	if (unlikely(val & NAPIF_STATE_MISSED)) {
++		__napi_schedule(n);
++		return false;
++	}
++
++	return true;
++}
++
+ bool napi_complete_done(struct napi_struct *n, int work_done)
+ {
+-	unsigned long flags, val, new, timeout = 0;
++	unsigned long flags, timeout = 0;
+ 	bool ret = true;
+ 
+-	napi_complete_oob(n);
++	if (netif_oob_diversion(n->dev)) {
++		napi_complete_oob(n);
++		if (net_running_oob())
++			return true;
++	}
+ 
+ 	/*
+ 	 * 1) Don't let napi dequeue from the cpu poll list
+@@ -6221,26 +6298,8 @@ bool napi_complete_done(struct napi_struct *n, int work_done)
+ 	}
+ 	WRITE_ONCE(n->list_owner, -1);
+ 
+-	val = READ_ONCE(n->state);
+-	do {
+-		WARN_ON_ONCE(!(val & NAPIF_STATE_SCHED));
+-
+-		new = val & ~(NAPIF_STATE_MISSED | NAPIF_STATE_SCHED |
+-			      NAPIF_STATE_SCHED_THREADED |
+-			      NAPIF_STATE_PREFER_BUSY_POLL);
+-
+-		/* If STATE_MISSED was set, leave STATE_SCHED set,
+-		 * because we will call napi->poll() one more time.
+-		 * This C code was suggested by Alexander Duyck to help gcc.
+-		 */
+-		new |= (val & NAPIF_STATE_MISSED) / NAPIF_STATE_MISSED *
+-						    NAPIF_STATE_SCHED;
+-	} while (!try_cmpxchg(&n->state, &val, new));
+-
+-	if (unlikely(val & NAPIF_STATE_MISSED)) {
+-		__napi_schedule(n);
++	if (!napi_schedule_unprep(n))
+ 		return false;
+-	}
+ 
+ 	if (timeout)
+ 		hrtimer_start(&n->timer, ns_to_ktime(timeout),
+@@ -6818,6 +6877,8 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
+ 
+ start:
+ 	sd->in_net_rx_action = true;
++	process_inband_rx_backlog(sd);
++
+ 	local_irq_disable();
+ 	list_splice_init(&sd->poll_list, &list);
+ 	local_irq_enable();
+@@ -10098,13 +10159,21 @@ static void netdev_init_one_queue(struct net_device *dev,
+ 	queue->xmit_lock_owner = -1;
+ 	netdev_queue_numa_node_write(queue, NUMA_NO_NODE);
+ 	queue->dev = dev;
++	netqueue_init_oob(&queue->oob);
+ #ifdef CONFIG_BQL
+ 	dql_init(&queue->dql, HZ);
+ #endif
+ }
+ 
++static inline void destroy_oob_queue(struct net_device *dev,
++				struct netdev_queue *nq, void *arg)
++{
++	netqueue_destroy_oob(&nq->oob);
++}
++
+ static void netif_free_tx_queues(struct net_device *dev)
+ {
++	netdev_for_each_tx_queue(dev, destroy_oob_queue, NULL);
+ 	kvfree(dev->_tx);
+ }
+ 
+@@ -11703,6 +11772,11 @@ static int __init net_dev_init(void)
+ #ifdef CONFIG_RPS
+ 		INIT_CSD(&sd->csd, rps_trigger_softirq, sd);
+ 		sd->cpu = i;
++#endif
++#ifdef CONFIG_NET_OOB
++		INIT_LIST_HEAD(&sd->inband_rx_list);
++		raw_spin_lock_init(&sd->inband_rx_lock);
++		init_irq_work(&sd->inband_rx_work, kick_rx_inband);
+ #endif
+ 		INIT_CSD(&sd->defer_csd, trigger_rx_softirq, sd);
+ 		spin_lock_init(&sd->defer_lock);
+diff --git a/net/core/gro.c b/net/core/gro.c
+index 58fffd59cef4..d4a590133ece 100644
+--- a/net/core/gro.c
++++ b/net/core/gro.c
+@@ -603,6 +603,13 @@ gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+ {
+ 	gro_result_t ret;
+ 
++	/*
++	 * Note: GRO is bypassed for devices enabling out-of-band RX,
++	 * including for in-band traffic not picked by the companion
++	 * core. In this case, the traffic flows through
++	 * process_inband_rx_backlog() -> _netif_receive_skb_list()
++	 * via NET_RX_SOFTIRQ.
++	 */
+ 	if (netif_receive_oob(skb))
+ 		return GRO_NORMAL;
+ 
+diff --git a/net/core/page_pool.c b/net/core/page_pool.c
+index 31f923e7b5c4..a578bf17fd1f 100644
+--- a/net/core/page_pool.c
++++ b/net/core/page_pool.c
+@@ -168,6 +168,10 @@ static void page_pool_producer_unlock(struct page_pool *pool,
+ 		spin_unlock_bh(&pool->ring.producer_lock);
+ }
+ 
++noinline
++static struct page *__page_pool_alloc_pages_slow(struct page_pool *pool,
++						gfp_t gfp);
++
+ static int page_pool_init(struct page_pool *pool,
+ 			  const struct page_pool_params *params)
+ {
+@@ -181,6 +185,9 @@ static int page_pool_init(struct page_pool *pool,
+ 
+ 	if (pool->p.pool_size)
+ 		ring_qsize = pool->p.pool_size;
++	/* Size of oob-accessed pools must be specified. */
++	else if (page_pool_is_oob(pool))
++		return -EINVAL;
+ 
+ 	/* Sanity limit mem that can be pinned down */
+ 	if (ring_qsize > 32768)
+@@ -215,6 +222,11 @@ static int page_pool_init(struct page_pool *pool,
+ 	    pool->p.flags & PP_FLAG_PAGE_FRAG)
+ 		return -EINVAL;
+ 
++	/* Cannot manage page frags in oob-accessed pools. */
++	if (page_pool_is_oob(pool) &&
++		pool->p.flags & PP_FLAG_PAGE_FRAG)
++		return -EINVAL;
++
+ #ifdef CONFIG_PAGE_POOL_STATS
+ 	pool->recycle_stats = alloc_percpu(struct page_pool_recycle_stats);
+ 	if (!pool->recycle_stats)
+@@ -236,6 +248,23 @@ static int page_pool_init(struct page_pool *pool,
+ 	if (pool->p.flags & PP_FLAG_DMA_MAP)
+ 		get_device(pool->p.dev);
+ 
++#ifdef CONFIG_PAGE_POOL_OOB
++	pool->alloc.cache = kzalloc_node(
++		sizeof(struct page *) * params->pool_size,
++		GFP_KERNEL, params->nid);
++	if (pool->alloc.cache == NULL) {
++#ifdef CONFIG_PAGE_POOL_STATS
++		free_percpu(pool->recycle_stats);
++#endif
++		ptr_ring_cleanup(&pool->ring, NULL);
++		return -ENOMEM;
++	}
++	raw_spin_lock_init(&pool->alloc.oob_lock);
++	/* Populate the fast cache of oob-accessed pools at init. */
++	if (page_pool_is_oob(pool))
++		__page_pool_alloc_pages_slow(pool, GFP_KERNEL);
++#endif
++
+ 	return 0;
+ }
+ 
+@@ -307,7 +336,7 @@ static struct page *page_pool_refill_alloc_cache(struct page_pool *pool)
+ 			page = NULL;
+ 			break;
+ 		}
+-	} while (pool->alloc.count < PP_ALLOC_CACHE_REFILL);
++	} while (pool->alloc.count < PP_ALLOC_CACHE_REFILL(pool));
+ 
+ 	/* Return last page */
+ 	if (likely(pool->alloc.count > 0)) {
+@@ -329,6 +358,9 @@ static struct page *__page_pool_get_cached(struct page_pool *pool)
+ 		page = pool->alloc.cache[--pool->alloc.count];
+ 		alloc_stat_inc(pool, fast);
+ 	} else {
++		/* Cache refilling is disabled for oob-accessed pools. */
++		if (unlikely(page_pool_is_oob(pool)))
++			return NULL;
+ 		page = page_pool_refill_alloc_cache(pool);
+ 	}
+ 
+@@ -416,7 +448,7 @@ noinline
+ static struct page *__page_pool_alloc_pages_slow(struct page_pool *pool,
+ 						 gfp_t gfp)
+ {
+-	const int bulk = PP_ALLOC_CACHE_REFILL;
++	const int bulk = PP_ALLOC_CACHE_REFILL(pool);
+ 	unsigned int pp_flags = pool->p.flags;
+ 	unsigned int pp_order = pool->p.order;
+ 	struct page *page;
+@@ -431,7 +463,7 @@ static struct page *__page_pool_alloc_pages_slow(struct page_pool *pool,
+ 		return pool->alloc.cache[--pool->alloc.count];
+ 
+ 	/* Mark empty alloc.cache slots "empty" for alloc_pages_bulk_array */
+-	memset(&pool->alloc.cache, 0, sizeof(void *) * bulk);
++	memset(pool->alloc.cache, 0, sizeof(void *) * bulk);
+ 
+ 	nr_pages = alloc_pages_bulk_array_node(gfp, pool->p.nid, bulk,
+ 					       pool->alloc.cache);
+@@ -477,6 +509,27 @@ struct page *page_pool_alloc_pages(struct page_pool *pool, gfp_t gfp)
+ 	struct page *page;
+ 
+ 	/* Fast-path: Get a page from cache */
++
++#ifdef CONFIG_PAGE_POOL_OOB
++	if (page_pool_is_oob(pool)) {
++		unsigned long flags;
++		/*
++		 * Fast, but still serialized. Out-of-band NAPI
++		 * context would not protect us from races since we
++		 * might have in-band vs oob races too.
++		 */
++		raw_spin_lock_irqsave(&pool->alloc.oob_lock, flags);
++		page = __page_pool_get_cached(pool);
++		raw_spin_unlock_irqrestore(&pool->alloc.oob_lock, flags);
++		/*
++		 * Slow path is disabled for oob-accessed pools,
++		 * either we did find a free page in the cache, or
++		 * things are about to get ugly.
++		 */
++		return page;
++	}
++#endif
++
+ 	page = __page_pool_get_cached(pool);
+ 	if (page)
+ 		return page;
+@@ -570,7 +623,7 @@ static bool page_pool_recycle_in_ring(struct page_pool *pool, struct page *page)
+ static bool page_pool_recycle_in_cache(struct page *page,
+ 				       struct page_pool *pool)
+ {
+-	if (unlikely(pool->alloc.count == PP_ALLOC_CACHE_SIZE)) {
++	if (unlikely(pool->alloc.count == PP_ALLOC_CACHE_SIZE(pool))) {
+ 		recycle_stat_inc(pool, cache_full);
+ 		return false;
+ 	}
+@@ -593,6 +646,35 @@ __page_pool_put_page(struct page_pool *pool, struct page *page,
+ {
+ 	lockdep_assert_no_hardirq();
+ 
++#ifdef CONFIG_PAGE_POOL_OOB
++	/*
++	 * Pages from oob-accessed pools always live in the fast
++	 * cache, never in the ring. They are released to the global
++	 * page allocator only when the pool is destroyed.
++	 */
++	if (page_pool_is_oob(pool)) {
++		unsigned long flags;
++		bool ret;
++		/*
++		 * If a page from an oob-accessed pool is still
++		 * referenced when released or the fast cache would
++		 * overflow, we bark at the console then bluntly leak
++		 * it. This situation should never occur, or would
++		 * denote a serious API usage issue anyway.
++		 */
++		if (WARN_ON(dovetail_debug() && page_ref_count(page) != 1))
++			return NULL;
++		if (pool->p.flags & PP_FLAG_DMA_SYNC_DEV)
++			page_pool_dma_sync_for_device(pool, page,
++						      dma_sync_size);
++		raw_spin_lock_irqsave(&pool->alloc.oob_lock, flags);
++		ret = page_pool_recycle_in_cache(page, pool);
++		raw_spin_unlock_irqrestore(&pool->alloc.oob_lock, flags);
++		WARN_ON(!ret);
++		return NULL;
++	}
++#endif
++
+ 	/* This allocator is optimized for the XDP mode that uses
+ 	 * one-frame-per-page, but have fallbacks that act like the
+ 	 * regular page allocator APIs.
+@@ -814,6 +896,9 @@ static void page_pool_free(struct page_pool *pool)
+ 
+ #ifdef CONFIG_PAGE_POOL_STATS
+ 	free_percpu(pool->recycle_stats);
++#endif
++#ifdef CONFIG_PAGE_POOL_OOB
++	kfree(pool->alloc.cache);
+ #endif
+ 	kfree(pool);
+ }
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 5847e5da6c1d..ae2dc5b95e2e 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -440,16 +440,25 @@ static void __build_skb_around(struct sk_buff *skb, void *data,
+  *  After IO, driver calls build_skb(), to allocate sk_buff and populate it
+  *  before giving packet to stack.
+  *  RX rings only contains data buffers, not full skbs.
++ *
++ *  Dovetail: allocation requests issued from the oob execution stage
++ *  are served by the oob buffer cache.
+  */
+ struct sk_buff *__build_skb(void *data, unsigned int frag_size)
+ {
+ 	struct sk_buff *skb;
+ 
+-	skb = kmem_cache_alloc(skbuff_cache, GFP_ATOMIC);
+-	if (unlikely(!skb))
+-		return NULL;
++	if (running_oob()) {
++		skb = get_oob_skb();
++		if (unlikely(!skb))
++			return NULL;
++	} else {
++		skb = kmem_cache_alloc(skbuff_cache, GFP_ATOMIC);
++		if (unlikely(!skb))
++			return NULL;
++		memset(skb, 0, offsetof(struct sk_buff, tail));
++	}
+ 
+-	memset(skb, 0, offsetof(struct sk_buff, tail));
+ 	__build_skb_around(skb, data, frag_size);
+ 
+ 	return skb;
+@@ -541,113 +550,106 @@ EXPORT_SYMBOL(napi_build_skb);
+ 
+ #ifdef CONFIG_NET_OOB
+ 
+-struct sk_buff *__netdev_alloc_oob_skb(struct net_device *dev, size_t len,
+-				size_t headroom, gfp_t gfp_mask)
+-{
+-	struct sk_buff *skb;
++unsigned int sysctl_max_oob_skb __read_mostly = 1024;
++EXPORT_SYMBOL(sysctl_max_oob_skb);
+ 
+-	headroom = ALIGN(NET_SKB_PAD + headroom, NET_SKB_PAD);
+-	skb = __alloc_skb(len + headroom, gfp_mask,
+-			SKB_ALLOC_RX, NUMA_NO_NODE);
+-	if (!skb)
+-		return NULL;
++__weak void free_skb_oob(struct sk_buff *skb)
++{ }
+ 
+-	skb_reserve(skb, headroom);
+-	skb->dev = dev;
+-	skb->oob = true;
+-	skb->oob_clone = false;
+-	skb->oob_cloned = false;
++__weak void free_skb_head_oob(struct sk_buff *skb)
++{ }
+ 
+-	return skb;
+-}
+-EXPORT_SYMBOL_GPL(__netdev_alloc_oob_skb);
+-
+-void __netdev_free_oob_skb(struct net_device *dev, struct sk_buff *skb)
++bool recycle_skb_oob(struct sk_buff *skb)
+ {
+-	skb->oob = false;
+-	skb->oob_clone = false;
+-	skb->oob_cloned = false;
+-	dev_kfree_skb(skb);
++	/*
++	 * Hand the buffer release over the out-of-band core either if
++	 * the latter owns the skb data or we are currently running
++	 * oob.
++	 */
++	if (running_oob() || skb_has_oob_storage(skb)) {
++		free_skb_oob(skb);
++		return true;
++	}
++
++	return false;
+ }
+-EXPORT_SYMBOL_GPL(__netdev_free_oob_skb);
+ 
+-void netdev_reset_oob_skb(struct net_device *dev, struct sk_buff *skb,
+-			size_t headroom)
++void finalize_skb_inband(struct sk_buff *skb)
+ {
+-	unsigned char *data = skb->head; /* Always from kmalloc_reserve(). */
+-
+-	if (WARN_ON_ONCE(!skb->oob || skb->oob_clone))
+-		return;
+-
+-	memset(skb, 0, offsetof(struct sk_buff, tail));
+-	__build_skb_around(skb, data, 0);
+-	headroom = ALIGN(NET_SKB_PAD + headroom, NET_SKB_PAD);
+-	skb_reserve(skb, headroom);
+-	skb->oob = true;
+-	skb->oob_clone = false;
+-	skb->oob_cloned = false;
+-	skb->dev = dev;
++	if (skb->fclone != SKB_FCLONE_UNAVAILABLE)
++		__kfree_skb(skb);
++	else
++		__napi_kfree_skb(skb, SKB_CONSUMED);
+ }
+-EXPORT_SYMBOL_GPL(netdev_reset_oob_skb);
+ 
+-struct sk_buff *skb_alloc_oob_head(gfp_t gfp_mask)
+-{
+-	struct sk_buff *skb = kmem_cache_alloc(skbuff_cache, gfp_mask);
++/*
++ * Pool for out-of-band allocation of buffers. The implementation is
++ * trivial ATM, we may improve this with per-CPU caches in the future.
++ */
++static struct skbuff_oob_pool skbuff_oob_pool;
+ 
+-	if (!skb)
+-		return NULL;
++void init_oob_cache(void)
++{
++	struct skbuff_oob_pool *c = &skbuff_oob_pool;
++	unsigned int n, max_skbs;
++	struct sk_buff *skb;
+ 
+ 	/*
+-	 * skb heads allocated for out-of-band traffic should be
+-	 * reserved for clones, so memset is extraneous in the sense
+-	 * that skb_morph_oob() should follow the allocation.
++	 * Populate the oob pool with buffers pulled from the regular
++	 * cache. Note: there is no point in using a llist for
++	 * maintaining the entries, our MPMC model requires locking,
++	 * so adding more atomic ops in the picture in addition to
++	 * spinlocking would make no sense.
+ 	 */
+-	memset(skb, 0, offsetof(struct sk_buff, tail));
+-	refcount_set(&skb->users, 1);
+-	skb->oob = true;
+-	skb->oob_clone = true;
+-	skb->oob_cloned = false;
+-	skb_set_kcov_handle(skb, kcov_common_handle());
+-
+-	return skb;
+-}
+-EXPORT_SYMBOL_GPL(skb_alloc_oob_head);
+-
+-static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb);
++	INIT_LIST_HEAD(&c->pool);
++	raw_spin_lock_init(&c->lock);
+ 
+-void skb_morph_oob_skb(struct sk_buff *n, struct sk_buff *skb)
+-{
+-	__skb_clone(n, skb);
+-	n->oob = true;
+-	n->oob_clone = true;
+-	n->oob_cloned = true;
+-	skb->oob_cloned = true;
++	max_skbs = READ_ONCE(sysctl_max_oob_skb);
++	for (n = 0; n < max_skbs; n++) {
++		skb = kmem_cache_alloc(skbuff_cache, GFP_KERNEL);
++		BUG_ON(!skb);
++		list_add(&skb->list, &c->pool);
++	}
+ }
+-EXPORT_SYMBOL_GPL(skb_morph_oob_skb);
+ 
+-bool skb_release_oob_skb(struct sk_buff *skb, int *dref)
++struct sk_buff *get_oob_skb(void)
+ {
+-	struct skb_shared_info *shinfo = skb_shinfo(skb);
+-
+-	if (!skb_unref(skb))
+-		return false;
++	struct skbuff_oob_pool *c = &skbuff_oob_pool;
++	struct sk_buff *skb = NULL;
++	unsigned long flags;
+ 
+-	/*
+-	 * ->nohdr is never set for oob shells, so we always refcount
+-         * the full data (header + payload) when cloned.
+-	 */
+-	*dref = skb->cloned ? atomic_sub_return(1, &shinfo->dataref) : 0;
++	raw_spin_lock_irqsave(&c->lock, flags);
++	if (!list_empty(&c->pool)) {
++		skb = list_first_entry(&c->pool, struct sk_buff, list);
++		list_del(&skb->list);
++		raw_spin_unlock_irqrestore(&c->lock, flags);
++		memset(skb, 0, offsetof(struct sk_buff, tail));
++		skb_mark_oob(skb);
++	} else {
++		raw_spin_unlock_irqrestore(&c->lock, flags);
++	}
+ 
+-	return true;
++	return skb;
+ }
+-EXPORT_SYMBOL_GPL(skb_release_oob_skb);
++EXPORT_SYMBOL(get_oob_skb);
+ 
+-__weak bool skb_oob_recycle(struct sk_buff *skb)
++void put_oob_skb(struct sk_buff *skb)
+ {
+-	return false;
++	struct skbuff_oob_pool *c = &skbuff_oob_pool;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&c->lock, flags);
++	list_add(&skb->list, &c->pool);
++	raw_spin_unlock_irqrestore(&c->lock, flags);
+ }
++EXPORT_SYMBOL(put_oob_skb);
++
++#else  /* !CONFIG_NET_OOB */
+ 
+-#endif	/* CONFIG_NET_OOB */
++static inline void init_oob_cache(void)
++{ }
++
++#endif	/* !CONFIG_NET_OOB */
+ 
+ /*
+  * kmalloc_reserve is a wrapper around kmalloc_node_track_caller that tells
+@@ -1174,11 +1176,12 @@ static void skb_release_all(struct sk_buff *skb, enum skb_drop_reason reason,
+ 
+ void __kfree_skb(struct sk_buff *skb)
+ {
+-	if (recycle_oob_skb(skb))
++	if (recycle_skb_oob(skb))
+ 		return;
+ 
+ 	skb_release_all(skb, SKB_DROP_REASON_NOT_SPECIFIED, false);
+-	kfree_skbmem(skb);
++	if (!__skb_oob_free_head(skb))
++		kfree_skbmem(skb);
+ }
+ EXPORT_SYMBOL(__kfree_skb);
+ 
+@@ -1433,11 +1436,12 @@ static void napi_skb_cache_put(struct sk_buff *skb)
+ 
+ void __napi_kfree_skb(struct sk_buff *skb, enum skb_drop_reason reason)
+ {
+-	if (recycle_oob_skb(skb))
++	if (recycle_skb_oob(skb))
+ 		return;
+ 
+ 	skb_release_all(skb, reason, true);
+-	napi_skb_cache_put(skb);
++	if (!__skb_oob_free_head(skb))
++		napi_skb_cache_put(skb);
+ }
+ 
+ void napi_skb_free_stolen_head(struct sk_buff *skb)
+@@ -1463,7 +1467,7 @@ void napi_consume_skb(struct sk_buff *skb, int budget)
+ 		return;
+ 	}
+ 
+-	DEBUG_NET_WARN_ON_ONCE(!in_softirq());
++	DEBUG_NET_WARN_ON_ONCE(running_inband() && !in_softirq());
+ 
+ 	if (!skb_unref(skb))
+ 		return;
+@@ -1477,11 +1481,12 @@ void napi_consume_skb(struct sk_buff *skb, int budget)
+ 		return;
+ 	}
+ 
+-	if (recycle_oob_skb(skb))
++	if (recycle_skb_oob(skb))
+ 		return;
+ 
+ 	skb_release_all(skb, SKB_CONSUMED, !!budget);
+-	napi_skb_cache_put(skb);
++	if (!__skb_oob_free_head(skb))
++		napi_skb_cache_put(skb);
+ }
+ EXPORT_SYMBOL(napi_consume_skb);
+ 
+@@ -1499,7 +1504,6 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
+ 	skb_dst_copy(new, old);
+ 	__skb_ext_copy(new, old);
+ 	__nf_copy(new, old, false);
+-	__skb_oob_copy(new, old);
+ 
+ 	/* Note : this field could be in the headers group.
+ 	 * It is not yet because we do not want to have a 16 bit hole
+@@ -2038,6 +2042,8 @@ struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
+ 		n->fclone = SKB_FCLONE_UNAVAILABLE;
+ 	}
+ 
++	__skb_inband_clone(n);
++
+ 	return __skb_clone(n, skb);
+ }
+ EXPORT_SYMBOL(skb_clone);
+@@ -4995,6 +5001,8 @@ void __init skb_init(void)
+ 						0,
+ 						SKB_SMALL_HEAD_HEADROOM,
+ 						NULL);
++	init_oob_cache();
++
+ 	skb_extensions_init();
+ }
+ 
+@@ -5857,8 +5865,11 @@ EXPORT_SYMBOL(__skb_warn_lro_forwarding);
+ void kfree_skb_partial(struct sk_buff *skb, bool head_stolen)
+ {
+ 	if (head_stolen) {
+-		skb_release_head_state(skb);
+-		kmem_cache_free(skbuff_cache, skb);
++		if (!recycle_skb_oob(skb)) {
++			skb_release_head_state(skb);
++			if (!__skb_oob_free_head(skb))
++				kmem_cache_free(skbuff_cache, skb);
++		}
+ 	} else {
+ 		__kfree_skb(skb);
+ 	}
+@@ -6676,6 +6687,7 @@ static int pskb_carve_inside_nonlinear(struct sk_buff *skb, const u32 off,
+ 	skb->len -= off;
+ 	skb->data_len = skb->len;
+ 	atomic_set(&skb_shinfo(skb)->dataref, 1);
++
+ 	return 0;
+ }
+ 
+diff --git a/net/core/sysctl_net_core.c b/net/core/sysctl_net_core.c
+index 373b5b2231c4..e6ab69517aaa 100644
+--- a/net/core/sysctl_net_core.c
++++ b/net/core/sysctl_net_core.c
+@@ -662,6 +662,17 @@ static struct ctl_table net_core_table[] = {
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+ 	},
++#ifdef CONFIG_NET_OOB
++	{
++		.procname	= "max_oob_skb",
++		.data		= &sysctl_max_oob_skb,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0444,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ONE_HUNDRED,
++		.extra2		= SYSCTL_INT_MAX,
++	},
++#endif
+ 	{ }
+ };
+ 
+diff --git a/net/ipv4/route.c b/net/ipv4/route.c
+index 0bde793edf32..504862f59877 100644
+--- a/net/ipv4/route.c
++++ b/net/ipv4/route.c
+@@ -2889,7 +2889,7 @@ struct rtable *ip_route_output_flow(struct net *net, struct flowi4 *flp4,
+ 	 * core might want to learn about the routing decision, pass
+ 	 * it on.
+ 	 */
+-	if (!IS_ERR(rt) && netdev_is_oob_port(rt->dst.dev))
++	if (!IS_ERR(rt) && netif_oob_port(rt->dst.dev))
+ 		ip_learn_oob_route(net, flp4, rt);
+ 
+ 	return rt;
+diff --git a/net/socket.c b/net/socket.c
+index b9b737ca0a1e..171f88036961 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -2168,7 +2168,7 @@ int __sys_connect_file(struct file *file, struct sockaddr_storage *address,
+ 
+ 	err = READ_ONCE(sock->ops)->connect(sock, (struct sockaddr *)address,
+ 				addrlen, sock->file->f_flags | file_flags);
+-	if (!err && sock_oob_capable(sock))
++	if (!err && sock_oob_capable(sock)) {
+ 		err = sock_oob_connect(sock->sk, (struct sockaddr *)address,
+ 				addrlen, sock->file->f_flags | file_flags);
+ 		if (err)
+-- 
+2.43.0
+

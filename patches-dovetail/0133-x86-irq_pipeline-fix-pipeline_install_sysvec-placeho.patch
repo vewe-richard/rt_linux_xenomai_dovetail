@@ -1,0 +1,28 @@
+From 4ffa8f85ad915c548f6140861a9c737370569d71 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 14 Sep 2024 17:43:54 +0200
+Subject: [PATCH 133/171] x86: irq_pipeline: fix pipeline_install_sysvec()
+ placeholder
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/include/asm/idtentry.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index 347d13771f4d..faeddb4a9db3 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -266,7 +266,8 @@ __visible noinstr void func(struct pt_regs *regs,			\
+ 									\
+ static noinline void __##func(struct pt_regs *regs, u32 vector)
+ 
+-static inline void pipeline_install_sysvec(vector, function) {}
++#define pipeline_install_sysvec(__vector, __function)	\
++	do { (void)__vector; (void)__function; } while (0)
+ 
+ #endif	/* !CONFIG_IRQ_PIPELINE */
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,80 @@
+From a600c94948644437287668089cd104dc67b022e0 Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Tue, 25 Jun 2024 11:03:16 +0200
+Subject: [PATCH 124/171] KVM: x86: dovetail: Allow kvm_wait() to be called
+ from any context
+
+kvm_wait() unconditionally enabled HW interrupts when called from
+pipeline entry code. That broke the PV (paravirtualized) spinlock
+implementation.
+
+The following calling contexts are supported now:
+  - pipeline entry, hard IRQs off:
+    Wakeup on vCPU kicks only, triggered by the current lock owner via
+    hypercall. Using halt().
+
+  - Linux IRQ context, hard IRQs on, in-band IRQs off:
+    Wakeup on the next hard IRQ, or by a vCPU kick.
+    Using native_safe_halt() to statisfy lockdep.
+
+  - Task context, hard IRQs on, in-band IRQs on:
+    Same as Linux IRQ context.
+
+The !CONFIG_IRQ_PIPELINE part is now re-synced with the version of
+Linux to keep trace events.
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/x86/kernel/kvm.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/kernel/kvm.c b/arch/x86/kernel/kvm.c
+index 6c4244e4ff60..aa20662f01ac 100644
+--- a/arch/x86/kernel/kvm.c
++++ b/arch/x86/kernel/kvm.c
+@@ -1057,22 +1057,36 @@ static void kvm_wait(u8 *ptr, u8 val)
+ 	 * for irq enabled case to avoid hang when lock info is overwritten
+ 	 * in irq spinlock slowpath and no spurious interrupt occur to save us.
+ 	 */
+-	if (irqs_disabled()) {
+-		hard_local_irq_disable();
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++
++	if (hard_irqs_disabled()) {
+ 		if (READ_ONCE(*ptr) == val)
+ 			halt();
++	} else {
++		hard_local_irq_disable();
++
++		if (READ_ONCE(*ptr) == val)
++			native_safe_halt(); /* enables hard IRQs */
++		else
++			hard_local_irq_enable();
++	}
+ 
+-		hard_local_irq_enable();
++#else /* !CONFIG_IRQ_PIPELINE */
++
++	if (irqs_disabled()) {
++		if (READ_ONCE(*ptr) == val)
++			halt();
+ 	} else {
+-		local_irq_disable_full();
++		local_irq_disable();
+ 
+ 		/* safe_halt() will enable IRQ */
+ 		if (READ_ONCE(*ptr) == val)
+ 			safe_halt();
+-
+-		local_irq_enable_full();
++		else
++			local_irq_enable();
+ 	}
++#endif
+ }
+ 
+ /*
+-- 
+2.43.0
+

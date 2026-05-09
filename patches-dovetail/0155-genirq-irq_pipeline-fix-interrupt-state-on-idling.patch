@@ -1,0 +1,90 @@
+From cb3196640c1d925982eb5cc8457bc7ca31406b6e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 15 Sep 2024 17:40:18 +0200
+Subject: [PATCH 155/171] genirq: irq_pipeline: fix interrupt state on idling
+
+We need irq_pipeline_can_idle() to leave the hard irqs off and the
+inband stage stalled on return, so that no IRQ can sneak in once the
+log has been flushed, and we don't break the logic of
+default_idle_call() which may follow.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/irq_pipeline.h |  1 +
+ kernel/irq/pipeline.c        | 18 +++++++++++-------
+ kernel/sched/idle.c          |  2 ++
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/irq_pipeline.h b/include/linux/irq_pipeline.h
+index 0bdc4facddbd..353f0b4de15d 100644
+--- a/include/linux/irq_pipeline.h
++++ b/include/linux/irq_pipeline.h
+@@ -84,6 +84,7 @@ void sync_inband_irqs(void);
+ static inline void irq_pipeline_idling_checks(void)
+ {
+ 	if (irq_pipeline_debug()) {
++		WARN_ON_ONCE(!raw_irqs_disabled());
+ 		WARN_ON_ONCE(!hard_irqs_disabled());
+ 		WARN_ON_ONCE(stage_irqs_pending(this_inband_staged()));
+ 	}
+diff --git a/kernel/irq/pipeline.c b/kernel/irq/pipeline.c
+index 452515804579..64fcf4b399c0 100644
+--- a/kernel/irq/pipeline.c
++++ b/kernel/irq/pipeline.c
+@@ -1638,8 +1638,8 @@ EXPORT_SYMBOL(irq_pipeline_nmi_exit);
+  *	Returns @true if the caller may proceed with idling, @false
+  *	otherwise. If @true, hard irqs are left disabled so that no
+  *	event might sneak in until the caller actually
+- *	idles. Otherwise, the stage is unstalled and hard irqs are
+- *	turned on.
++ *	idles. Otherwise, the interrupt log is synchronized before
++ *	leaving this routine with hard irqs on.
+  */
+ bool irq_pipeline_can_idle(void)
+ {
+@@ -1656,7 +1656,6 @@ bool irq_pipeline_can_idle(void)
+ 		synchronize_pipeline();
+ 		stall_inband_nocheck();
+ 		trace_hardirqs_off();
+-		local_irq_enable_full();
+ 		return false;
+ 	}
+ 
+@@ -1691,12 +1690,17 @@ bool __weak irq_cpuidle_control(struct cpuidle_device *dev,
+ bool irq_cpuidle_enter(struct cpuidle_device *dev,
+ 		       struct cpuidle_state *state)
+ {
+-	if (!irq_pipeline_can_idle()) {
+-		hard_local_irq_disable();
++	bool ret;
++
++	ret = irq_pipeline_can_idle();
++	irq_pipeline_idling_checks();
++	if (!ret)
+ 		return false;
+-	}
+ 
+-	return irq_cpuidle_control(dev, state);
++	ret = irq_cpuidle_control(dev, state);
++	irq_pipeline_idling_checks();
++
++	return ret;
+ }
+ 
+ static unsigned int inband_work_sirq;
+diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+index 765ce0ba1517..21a64028140e 100644
+--- a/kernel/sched/idle.c
++++ b/kernel/sched/idle.c
+@@ -175,6 +175,8 @@ static void cpuidle_idle_call(void)
+ 		tick_nohz_idle_stop_tick();
+ 		if (irq_pipeline_can_idle())
+ 			default_idle_call();
++		else
++			local_irq_enable_full();
+ 		goto exit_idle;
+ 	}
+ 
+-- 
+2.43.0
+

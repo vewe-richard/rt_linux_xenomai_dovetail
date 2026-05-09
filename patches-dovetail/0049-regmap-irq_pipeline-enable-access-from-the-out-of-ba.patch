@@ -1,0 +1,123 @@
+From 3e3b322536de31fe50a66e780e216f4492a31b08 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 15 Aug 2019 11:57:25 +0200
+Subject: [PATCH 049/171] regmap: irq_pipeline: enable access from the
+ out-of-band stage
+
+Add support for the hard spinlock type, which can serialize callers
+which belong to different interrupt stages (i.e. in-band vs
+out-of-band). This assumes the protected sections are short, which
+was already a common assumption with regular spinlocks.
+
+Out-of-band locking is enabled by setting config.oob_io to true, which
+is only considered in fast_io mode.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/base/regmap/internal.h |  5 ++++-
+ drivers/base/regmap/regmap.c   | 33 ++++++++++++++++++++++++++++++---
+ include/linux/regmap.h         |  1 +
+ 3 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/base/regmap/internal.h b/drivers/base/regmap/internal.h
+index 9a9ea514c2d8..56b283ddb7b3 100644
+--- a/drivers/base/regmap/internal.h
++++ b/drivers/base/regmap/internal.h
+@@ -51,7 +51,10 @@ struct regmap {
+ 	union {
+ 		struct mutex mutex;
+ 		struct {
+-			spinlock_t spinlock;
++			union {
++				spinlock_t spinlock;
++				hard_spinlock_t oob_lock;
++			};
+ 			unsigned long spinlock_flags;
+ 		};
+ 		struct {
+diff --git a/drivers/base/regmap/regmap.c b/drivers/base/regmap/regmap.c
+index 234a84ecde8b..918b5aba00a7 100644
+--- a/drivers/base/regmap/regmap.c
++++ b/drivers/base/regmap/regmap.c
+@@ -17,6 +17,7 @@
+ #include <linux/delay.h>
+ #include <linux/log2.h>
+ #include <linux/hwspinlock.h>
++#include <linux/dovetail.h>
+ #include <asm/unaligned.h>
+ 
+ #define CREATE_TRACE_POINTS
+@@ -485,6 +486,23 @@ __releases(&map->raw_spinlock)
+ 	raw_spin_unlock_irqrestore(&map->raw_spinlock, map->raw_spinlock_flags);
+ }
+ 
++static void regmap_lock_oob(void *__map)
++__acquires(&map->oob_lock)
++{
++	struct regmap *map = __map;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&map->oob_lock, flags);
++	map->spinlock_flags = flags;
++}
++
++static void regmap_unlock_oob(void *__map)
++__releases(&map->oob_lock)
++{
++	struct regmap *map = __map;
++	raw_spin_unlock_irqrestore(&map->oob_lock, map->spinlock_flags);
++}
++
+ static void dev_get_regmap_release(struct device *dev, void *res)
+ {
+ 	/*
+@@ -723,7 +741,13 @@ struct regmap *__regmap_init(struct device *dev,
+ 	} else {
+ 		if ((bus && bus->fast_io) ||
+ 		    config->fast_io) {
+-			if (config->use_raw_spinlock) {
++			if (dovetailing() && config->oob_io) {
++				raw_spin_lock_init(&map->oob_lock);
++				map->lock = regmap_lock_oob;
++				map->unlock = regmap_unlock_oob;
++				lockdep_set_class_and_name(&map->oob_lock,
++							lock_key, lock_name);
++			} else if (config->use_raw_spinlock) {
+ 				raw_spin_lock_init(&map->raw_spinlock);
+ 				map->lock = regmap_lock_raw_spinlock;
+ 				map->unlock = regmap_unlock_raw_spinlock;
+@@ -736,14 +760,17 @@ struct regmap *__regmap_init(struct device *dev,
+ 				lockdep_set_class_and_name(&map->spinlock,
+ 							   lock_key, lock_name);
+ 			}
+-		} else {
++		} else if (!config->oob_io) { /* Catch configuration issue: oob && !fast_io */
+ 			mutex_init(&map->mutex);
+ 			map->lock = regmap_lock_mutex;
+ 			map->unlock = regmap_unlock_mutex;
+ 			map->can_sleep = true;
+ 			lockdep_set_class_and_name(&map->mutex,
+ 						   lock_key, lock_name);
+-		}
++		} else {
++			ret = -ENXIO;
++			goto err_name;
++ 		}
+ 		map->lock_arg = map;
+ 	}
+ 
+diff --git a/include/linux/regmap.h b/include/linux/regmap.h
+index c9182a47736e..a0dd7d07de25 100644
+--- a/include/linux/regmap.h
++++ b/include/linux/regmap.h
+@@ -420,6 +420,7 @@ struct regmap_config {
+ 
+ 	bool fast_io;
+ 	bool io_port;
++	bool oob_io;
+ 
+ 	unsigned int max_register;
+ 	const struct regmap_access_table *wr_table;
+-- 
+2.43.0
+

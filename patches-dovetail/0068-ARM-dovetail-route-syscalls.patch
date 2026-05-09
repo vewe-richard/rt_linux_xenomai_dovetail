@@ -1,0 +1,231 @@
+From 0a4a0316d5d5326faff9e4ce3aaf57c927674c5e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 12 May 2020 18:08:44 +0200
+Subject: [PATCH 068/171] ARM: dovetail: route syscalls
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/Kconfig                   |  5 +++
+ arch/arm/include/asm/syscall.h     |  5 +++
+ arch/arm/include/asm/thread_info.h |  9 +++-
+ arch/arm/kernel/entry-common.S     | 68 +++++++++++++++++++++++++++++-
+ arch/arm/kernel/signal.c           | 18 ++++++++
+ 5 files changed, 102 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index d3f3c86688fb..3ccb372b267a 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -249,6 +249,11 @@ config FIQ
+ config ARCH_MTD_XIP
+ 	bool
+ 
++# Limited I-pipe compat (syscall routing only).
++config IPIPE_COMPAT
++	bool
++	select DOVETAIL_LEGACY_SYSCALL_RANGE
++
+ config ARM_PATCH_PHYS_VIRT
+ 	bool "Patch physical to virtual translations at runtime" if !ARCH_MULTIPLATFORM
+ 	default y
+diff --git a/arch/arm/include/asm/syscall.h b/arch/arm/include/asm/syscall.h
+index fe4326d938c1..0cc501cf999b 100644
+--- a/arch/arm/include/asm/syscall.h
++++ b/arch/arm/include/asm/syscall.h
+@@ -80,6 +80,11 @@ static inline void syscall_get_arguments(struct task_struct *task,
+ 	memcpy(args, &regs->ARM_r0 + 1, 5 * sizeof(args[0]));
+ }
+ 
++static inline unsigned long syscall_get_arg0(struct pt_regs *regs)
++{
++	return regs->ARM_ORIG_r0;
++}
++
+ static inline int syscall_get_arch(struct task_struct *task)
+ {
+ 	/* ARM tasks don't change audit architectures on the fly. */
+diff --git a/arch/arm/include/asm/thread_info.h b/arch/arm/include/asm/thread_info.h
+index 819d8f3130ea..e399af40aa62 100644
+--- a/arch/arm/include/asm/thread_info.h
++++ b/arch/arm/include/asm/thread_info.h
+@@ -150,6 +150,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
+ #define TIF_UPROBE		3	/* breakpointed or singlestepping */
+ #define TIF_NOTIFY_SIGNAL	4	/* signal notifications exist */
++#define TIF_RETUSER		5	/* INBAND_TASK_RETUSER is pending */
+ 
+ #define TIF_USING_IWMMXT	17
+ #define TIF_MEMDIE		18	/* is terminating due to OOM killer */
+@@ -170,10 +171,14 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
+ #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
+ #define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
++#define _TIF_RETUSER		(1 << TIF_RETUSER)
+ #define _TIF_USING_IWMMXT	(1 << TIF_USING_IWMMXT)
+ #define _TIF_MAYDAY		(1 << TIF_MAYDAY)
+ 
+-/* Checks for any syscall work in entry-common.S */
++/*
++ * Checks for any syscall work in entry-common.S.
++ * CAUTION: Only bit0-bit15 are tested there.
++ */
+ #define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+ 			   _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP)
+ 
+@@ -182,7 +187,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+  */
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_UPROBE | \
+-				 _TIF_NOTIFY_SIGNAL)
++				 _TIF_NOTIFY_SIGNAL | _TIF_RETUSER)
+ 
+ /*
+  * Local (synchronous) thread flags.
+diff --git a/arch/arm/kernel/entry-common.S b/arch/arm/kernel/entry-common.S
+index a4dff9aeb9fb..7ad9a4a859a8 100644
+--- a/arch/arm/kernel/entry-common.S
++++ b/arch/arm/kernel/entry-common.S
+@@ -3,6 +3,7 @@
+  *  linux/arch/arm/kernel/entry-common.S
+  *
+  *  Copyright (C) 2000 Russell King
++ *  Copyright (C) 2005 Stelian Pop.
+  */
+ 
+ #include <asm/assembler.h>
+@@ -12,6 +13,7 @@
+ #include <asm/page.h>
+ #ifdef CONFIG_AEABI
+ #include <asm/unistd-oabi.h>
++#include <uapi/asm-generic/dovetail.h>
+ #endif
+ 
+ 	.equ	NR_syscalls, __NR_syscalls
+@@ -123,7 +125,7 @@ no_work_pending:
+ ENDPROC(ret_to_user_from_irq)
+ ENDPROC(ret_to_user)
+ ENTRY(fast_ret_to_user)
+-	disable_irq_notrace
++	disable_irq_notrace			@ disable interrupts
+ 	b	no_work_pending
+ ENDPROC(fast_ret_to_user)
+ 
+@@ -261,6 +263,70 @@ ENTRY(vector_swi)
+  TRACE(	ldmia	sp, {r0 - r3}		)
+ 
+ local_restart:
++#ifdef CONFIG_DOVETAIL
++	ldr	r10, [tsk, #TI_LOCAL_FLAGS]	@ tsk(r10) is callee-saved
++#ifdef CONFIG_IPIPE_COMPAT
++	ldr	r0, =#0xf0042			@ old syscall signature
++	cmp	scno, r0
++	bne	1f
++	add	scno, scno, #__OOB_SYSCALL_BIT	@ force in oob marker
++	b	fastcall_try
++1:
++#endif	
++#ifdef CONFIG_DOVETAIL_LEGACY_SYSCALL_RANGE
++	ldr	r0, =#__OOB_SYSCALL_BIT
++	ands	r0, scno, r0
++	bne	fastcall_try
++#endif
++	cmp	scno, #__NR_prctl
++	bne	slow_path
++	ldr	r0, [sp, #S_OLD_R0]
++	tst	r0, #__OOB_SYSCALL_BIT
++	beq	slow_path
++fastcall_try:
++	tst	r10, #_TLF_OOB
++	beq	slow_path
++	mov	r0, sp				@ regs
++	bl	handle_oob_syscall
++	ldr	r10, [tsk, #TI_LOCAL_FLAGS]
++	tst	r0, r0
++	beq	slow_path
++	tst	r10, #_TLF_OOB
++	bne	fastcall_exit_check		@ check for MAYDAY
++	bl	sync_inband_irqs
++	b	ret_slow_syscall
++fastcall_exit_check:
++	ldr	r10, [tsk, #TI_FLAGS]
++	tst	r10, #_TIF_MAYDAY
++	beq	fast_ret_to_user
++	mov	r0, sp				@ regs
++	bl	dovetail_call_mayday
++	b	fast_ret_to_user
++slow_path:
++	tst	r10, #_TLF_DOVETAIL
++	bne	pipeline_syscall
++#ifdef CONFIG_DOVETAIL_LEGACY_SYSCALL_RANGE
++	ldr	r0, =#__OOB_SYSCALL_BIT
++	ands	r0, scno, r0
++	bne	pipeline_syscall
++#endif	
++	cmp	scno, #__NR_prctl
++	bne	root_syscall
++	ldr	r0, [sp, #S_OLD_R0]
++	tst	r0, #__OOB_SYSCALL_BIT
++	beq	root_syscall
++pipeline_syscall:
++	mov	r0, sp				@ regs
++	bl	__pipeline_syscall
++	ldr	r10, [tsk, #TI_LOCAL_FLAGS]
++	tst	r10, #_TLF_OOB
++	bne	fast_ret_to_user
++	cmp	r0, #0
++	bgt	ret_slow_syscall
++root_syscall:
++	ldmia	sp, { r0 - r3 }
++#endif /* CONFIG_DOVETAIL */
++
+ 	ldr	r10, [tsk, #TI_FLAGS]		@ check for syscall tracing
+ 	stmdb	sp!, {r4, r5}			@ push fifth and sixth args
+ 
+diff --git a/arch/arm/kernel/signal.c b/arch/arm/kernel/signal.c
+index a0833136ce2c..2631632090c0 100644
+--- a/arch/arm/kernel/signal.c
++++ b/arch/arm/kernel/signal.c
+@@ -599,6 +599,17 @@ static int do_signal(struct pt_regs *regs, int syscall)
+ 	return 0;
+ }
+ 
++static inline void do_retuser(void)
++{
++	unsigned int thread_flags;
++
++	if (dovetailing()) {
++		thread_flags = current_thread_info()->flags;
++		if (thread_flags & _TIF_RETUSER)
++			inband_retuser_notify();
++	}
++}
++
+ asmlinkage int
+ do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
+ {
+@@ -627,6 +638,7 @@ do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
+ 			if (thread_flags & (_TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL)) {
+ 				int restart = do_signal(regs, syscall);
+ 				if (unlikely(restart)) {
++					do_retuser();
+ 					/*
+ 					 * Restart without handlers.
+ 					 * Deal with it without leaving
+@@ -640,8 +652,14 @@ do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
+ 			} else {
+ 				resume_user_mode_work(regs);
+ 			}
++			do_retuser();
+ 		}
+ 		hard_local_irq_disable();
++
++		/* RETUSER might have switched oob */
++		if (!running_inband())
++			break;
++
+ 		thread_flags = read_thread_flags();
+ 	} while (inband_irq_pending() || (thread_flags & _TIF_WORK_MASK));
+ 	return 0;
+-- 
+2.43.0
+

@@ -1,0 +1,41 @@
+aca60b539cb67651e85dcc83b494a1bbcf29a7ad
+diff --cc arch/x86/kernel/traps.c
+index 7a63c66cfebf,37b8e20c03a9..98612d12dc1e
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@@ -283,23 -277,19 +328,27 @@@ static noinstr bool handle_bug(struct p
+  	 * Since we're emulating a CALL with exceptions, restore the interrupt
+  	 * state to what it was at the exception site.
+  	 */
+ -	if (regs->flags & X86_EFLAGS_IF)
+ -		raw_local_irq_enable();
+ +	if (regs->flags & X86_EFLAGS_IF) {
+ +		if (running_oob())
+ +			hard_local_irq_enable();
+ +		else
+ +			local_irq_enable_full();
+ +	}
+- 	if (report_bug(regs->ip, regs) == BUG_TRAP_TYPE_WARN ||
+- 	    handle_cfi_failure(regs) == BUG_TRAP_TYPE_WARN) {
+- 		regs->ip += LEN_UD2;
+- 		handled = true;
++ 	if (ud_type == BUG_UD2) {
++ 		if (report_bug(regs->ip, regs) == BUG_TRAP_TYPE_WARN ||
++ 		    handle_cfi_failure(regs) == BUG_TRAP_TYPE_WARN) {
++ 			regs->ip += LEN_UD2;
++ 			handled = true;
++ 		}
++ 	} else if (IS_ENABLED(CONFIG_UBSAN_TRAP)) {
++ 		pr_crit("%s at %pS\n", report_ubsan_failure(regs, imm), (void *)regs->ip);
+  	}
+ -	if (regs->flags & X86_EFLAGS_IF)
+ -		raw_local_irq_disable();
+ +	if (regs->flags & X86_EFLAGS_IF) {
+ +		if (running_oob())
+ +			hard_local_irq_disable();
+ +		else
+ +			local_irq_disable_full();
+ +	}
+  	instrumentation_end();
+  
+  	return handled;

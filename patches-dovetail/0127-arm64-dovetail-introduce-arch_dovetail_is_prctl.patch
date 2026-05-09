@@ -1,0 +1,29 @@
+From 38a43d4e3d058dfe58825a6d73116082d1ced722 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 1 Aug 2024 10:56:36 +0200
+Subject: [PATCH 127/171] arm64: dovetail: introduce arch_dovetail_is_prctl()
+
+Drop arch_dovetail_is_syscall() which moved to the generic support,
+and uses arch_dovetail_is_prctl().
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/include/asm/dovetail.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/dovetail.h b/arch/arm64/include/asm/dovetail.h
+index f7a672c750a9..dc46f131e3eb 100644
+--- a/arch/arm64/include/asm/dovetail.h
++++ b/arch/arm64/include/asm/dovetail.h
+@@ -38,7 +38,7 @@ static inline void arch_dovetail_switch_finish(bool enter_inband)
+  * hell. At the end of the day, this number is written in stone to
+  * honor the ABI stability promise anyway.
+  */
+-#define arch_dovetail_is_syscall(__nr)	\
++#define arch_dovetail_is_prctl(__nr)	\
+ 	(is_compat_task() ? (__nr) == 172 : (__nr) == __NR_prctl)
+ 
+ #endif
+-- 
+2.43.0
+

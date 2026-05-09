@@ -1,0 +1,98 @@
+From cd61cfb221f48e5453826dd6a8a9023f1438d25a Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 11 Aug 2020 20:03:34 +0200
+Subject: [PATCH 014/171] clocksource/drivers/timer-ti-dm: turn into
+ user-visible MMIO clocksource
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/clocksource/Kconfig                |  1 +
+ drivers/clocksource/timer-ti-dm-systimer.c | 25 +++++++++++-----------
+ 2 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/clocksource/Kconfig b/drivers/clocksource/Kconfig
+index 0ba0dc4ecf06..4e13785ab43b 100644
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -25,6 +25,7 @@ config I8253_LOCK
+ config OMAP_DM_SYSTIMER
+ 	bool
+ 	select TIMER_OF
++	imply GENERIC_CLOCKSOURCE_VDSO
+ 
+ config CLKBLD_I8253
+ 	def_bool y if CLKSRC_I8253 || CLKEVT_I8253 || I8253_LOCK
+diff --git a/drivers/clocksource/timer-ti-dm-systimer.c b/drivers/clocksource/timer-ti-dm-systimer.c
+index c2dcd8d68e45..da0b92390e2f 100644
+--- a/drivers/clocksource/timer-ti-dm-systimer.c
++++ b/drivers/clocksource/timer-ti-dm-systimer.c
+@@ -57,7 +57,7 @@ struct dmtimer_clockevent {
+ };
+ 
+ struct dmtimer_clocksource {
+-	struct clocksource dev;
++	struct clocksource_user_mmio mmio;
+ 	struct dmtimer_systimer t;
+ 	unsigned int loadval;
+ };
+@@ -706,15 +706,7 @@ static int __init dmtimer_percpu_quirk_init(struct device_node *np, u32 pa)
+ static struct dmtimer_clocksource *
+ to_dmtimer_clocksource(struct clocksource *cs)
+ {
+-	return container_of(cs, struct dmtimer_clocksource, dev);
+-}
+-
+-static u64 dmtimer_clocksource_read_cycles(struct clocksource *cs)
+-{
+-	struct dmtimer_clocksource *clksrc = to_dmtimer_clocksource(cs);
+-	struct dmtimer_systimer *t = &clksrc->t;
+-
+-	return (u64)readl_relaxed(t->base + t->counter);
++	return container_of(cs, struct dmtimer_clocksource, mmio.mmio.clksrc);
+ }
+ 
+ static void __iomem *dmtimer_sched_clock_counter;
+@@ -753,6 +745,7 @@ static void dmtimer_clocksource_resume(struct clocksource *cs)
+ static int __init dmtimer_clocksource_init(struct device_node *np)
+ {
+ 	struct dmtimer_clocksource *clksrc;
++	struct clocksource_mmio_regs mmr;
+ 	struct dmtimer_systimer *t;
+ 	struct clocksource *dev;
+ 	int error;
+@@ -761,7 +754,7 @@ static int __init dmtimer_clocksource_init(struct device_node *np)
+ 	if (!clksrc)
+ 		return -ENOMEM;
+ 
+-	dev = &clksrc->dev;
++	dev = &clksrc->mmio.mmio.clksrc;
+ 	t = &clksrc->t;
+ 
+ 	error = dmtimer_systimer_setup(np, t);
+@@ -770,7 +763,7 @@ static int __init dmtimer_clocksource_init(struct device_node *np)
+ 
+ 	dev->name = "dmtimer";
+ 	dev->rating = 300;
+-	dev->read = dmtimer_clocksource_read_cycles;
++	dev->read = clocksource_mmio_readl_up,
+ 	dev->mask = CLOCKSOURCE_MASK(32);
+ 	dev->flags = CLOCK_SOURCE_IS_CONTINUOUS;
+ 
+@@ -793,7 +786,13 @@ static int __init dmtimer_clocksource_init(struct device_node *np)
+ 		sched_clock_register(dmtimer_read_sched_clock, 32, t->rate);
+ 	}
+ 
+-	if (clocksource_register_hz(dev, t->rate))
++	mmr.reg_lower = t->base + t->counter;
++	mmr.bits_lower = 32;
++	mmr.reg_upper = 0;
++	mmr.bits_upper = 0;
++	mmr.revmap = NULL;
++
++	if (clocksource_user_mmio_init(&clksrc->mmio, &mmr, t->rate))
+ 		pr_err("Could not register clocksource %pOF\n", np);
+ 
+ 	return 0;
+-- 
+2.43.0
+

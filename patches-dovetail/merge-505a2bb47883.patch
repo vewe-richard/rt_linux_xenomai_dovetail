@@ -1,0 +1,37 @@
+505a2bb47883390c4bf19fe35db5622359af1a2c
+diff --cc drivers/irqchip/irq-imx-irqsteer.c
+index 052661bf1683,7df53b4532b4..0d9180a4af50
+--- a/drivers/irqchip/irq-imx-irqsteer.c
++++ b/drivers/irqchip/irq-imx-irqsteer.c
+@@@ -72,11 -73,26 +73,27 @@@ static void imx_irqsteer_irq_mask(struc
+  	raw_spin_unlock_irqrestore(&data->lock, flags);
+  }
+  
++ static void imx_irqsteer_irq_bus_lock(struct irq_data *d)
++ {
++ 	struct irqsteer_data *data = d->chip_data;
++ 
++ 	pm_runtime_get_sync(data->dev);
++ }
++ 
++ static void imx_irqsteer_irq_bus_sync_unlock(struct irq_data *d)
++ {
++ 	struct irqsteer_data *data = d->chip_data;
++ 
++ 	pm_runtime_put_autosuspend(data->dev);
++ }
++ 
+  static const struct irq_chip imx_irqsteer_irq_chip = {
+- 	.name		= "irqsteer",
+- 	.irq_mask	= imx_irqsteer_irq_mask,
+- 	.irq_unmask	= imx_irqsteer_irq_unmask,
+- 	.flags		= IRQCHIP_PIPELINE_SAFE,
++ 	.name			= "irqsteer",
++ 	.irq_mask		= imx_irqsteer_irq_mask,
++ 	.irq_unmask		= imx_irqsteer_irq_unmask,
++ 	.irq_bus_lock		= imx_irqsteer_irq_bus_lock,
++ 	.irq_bus_sync_unlock	= imx_irqsteer_irq_bus_sync_unlock,
+++	.flags			= IRQCHIP_PIPELINE_SAFE,
+  };
+  
+  static int imx_irqsteer_irq_map(struct irq_domain *h, unsigned int irq,

@@ -1,0 +1,49 @@
+From 9ca6970d15cfb65f57bbc7c0743c4bd2b9302fe8 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 17 Sep 2023 11:40:23 +0200
+Subject: [PATCH 096/171] ARM: irq_pipeline: export CALL_FUNCTION_OOB_IPI
+
+An SGI to trigger function calls on remote CPUs via IPIs.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/include/asm/irq_pipeline.h | 5 +++--
+ arch/arm/kernel/smp.c               | 2 +-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/include/asm/irq_pipeline.h b/arch/arm/include/asm/irq_pipeline.h
+index c70a462da491..da57c86254c3 100644
+--- a/arch/arm/include/asm/irq_pipeline.h
++++ b/arch/arm/include/asm/irq_pipeline.h
+@@ -13,12 +13,13 @@
+ /*
+  * In order to cope with the limited number of SGIs available to us,
+  * In-band IPI messages are multiplexed over SGI0, whereas out-of-band
+- * IPIs are directly mapped to SGI1-2.
++ * IPIs are directly mapped to SGI1-3.
+  */
+-#define OOB_NR_IPI		2
++#define OOB_NR_IPI		3
+ #define OOB_IPI_OFFSET		1 /* SGI1 */
+ #define TIMER_OOB_IPI		(ipi_irq_base + OOB_IPI_OFFSET)
+ #define RESCHEDULE_OOB_IPI	(TIMER_OOB_IPI + 1)
++#define CALL_FUNCTION_OOB_IPI	(RESCHEDULE_OOB_IPI + 1)
+ 
+ extern int ipi_irq_base;
+ 
+diff --git a/arch/arm/kernel/smp.c b/arch/arm/kernel/smp.c
+index 8bde5b331935..1ebb9a54037e 100644
+--- a/arch/arm/kernel/smp.c
++++ b/arch/arm/kernel/smp.c
+@@ -819,7 +819,7 @@ void __init set_smp_ipi_range(int ipi_base, int n)
+ 	/*
+ 	 * irq_pipeline: the in-band stage traps SGI0 only,
+ 	 * over which IPI messages are mutiplexed. Other SGIs
+-	 * are available for exchanging out-of-band IPIs.
++	 * are available for delivering out-of-band IPIs.
+ 	 */
+ 	inband_nr_ipi = irqs_pipelined() ? 1 : nr_ipi;
+ 
+-- 
+2.43.0
+
