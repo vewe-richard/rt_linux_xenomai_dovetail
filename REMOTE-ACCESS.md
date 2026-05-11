@@ -69,6 +69,33 @@ adb devices          # Should show: 5e90b593   device
 adb shell            # Enter board shell
 ```
 
+## Board Info (verified 2026-05-11)
+
+| Item | Value |
+|------|-------|
+| Kit type | **Vision Kit** (not Core Kit) |
+| SDK | **QIMP** (Qualcomm Intelligent Multimedia Product) |
+| SoC | QCS6490 |
+| Machine (Yocto) | `qcs6490-rb3gen2-vision-kit` |
+| DISTRO | `qcom-wayland 1.0` |
+| Current kernel | `6.6.28-01890-g350dfd604d2f` (2024-06-19, PREEMPT) |
+| USB ID | `05c6:9135` |
+| USB interfaces | DIAG (ff/30) + QMI (ff/70) + ADB (42/01) — no CDC ACM serial |
+| Serial console | **Missing**, need physical UART cable |
+
+To identify on a new board:
+
+```bash
+adb shell cat /proc/device-tree/model
+# → "Qualcomm Technologies, Inc. Robotics RB3gen2 addons vision mezz platform"
+
+adb shell cat /etc/build | grep qim
+# → meta-qcom-qim-product-sdk ... (confirms QIMP, not QIRP)
+
+adb shell uname -a
+# Check kernel version
+```
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |

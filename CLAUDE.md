@@ -202,7 +202,7 @@ docker run --rm -it -e LOCAL_USER_ID=`id -u $USER` \
 
 # 在容器内：
 export EXTRALAYERS="meta-qcom-realtime"  # 如需 RT 支持 (我们参考用)
-MACHINE=qcs6490-rb3gen2-core-kit \
+MACHINE=qcs6490-rb3gen2-vision-kit \
   DISTRO=qcom-wayland \
   QCOM_SELECTED_BSP=custom \
   source setup-environment
@@ -214,7 +214,7 @@ bitbake qcom-multimedia-image
 
 | 变量 | 值 | 说明 |
 |------|-----|------|
-| `MACHINE` | `qcs6490-rb3gen2-core-kit` | RB3 Gen2 对应 QCS6490 SoC, ARM64 |
+| `MACHINE` | `qcs6490-rb3gen2-vision-kit` | RB3 Gen2 Vision Kit, QCS6490 SoC, ARM64 |
 | `DISTRO` | `qcom-wayland` | QCOM Wayland 发行版 |
 | `QCOM_SELECTED_BSP` | `custom` | 使用 custom BSP (含多媒体/GPU)，默认即为此值 |
 | `EXTRALAYERS` | 空格分隔的 layer 列表 | 构建前声明额外 Yocto 层 |
@@ -223,7 +223,7 @@ bitbake qcom-multimedia-image
 
 `setup-environment` 脚本位于 `layers/meta-qcom-hwe/scripts/`，也可以直接在宿主机运行：
 ```bash
-MACHINE=qcs6490-rb3gen2-core-kit DISTRO=qcom-wayland source setup-environment
+MACHINE=qcs6490-rb3gen2-vision-kit DISTRO=qcom-wayland source setup-environment
 bitbake qcom-multimedia-image
 ```
 需提前安装 Yocto 所需的宿主机依赖包 (`gawk wget git diffstat unzip texinfo gcc build-essential chrpath socat cpio python3 ...`)。
@@ -336,16 +336,30 @@ Layer 1: 架构适配 (ARM64/ARM/x86 的 syscall/trap/fpu 重路由)
 
 ---
 
-## Current State (2026-05-09)
+## Current State (2026-05-11)
 
 - [x] All repos cloned locally
 - [x] Versions identified: dovetail 6.6.69, qcom 6.6.119
 - [x] Reference layer (meta-qcom-realtime) analyzed
 - [x] **Phase 1 done**: 提取 Dovetail 补丁 (171 patches + 8 merge refs + 1 combined diff)
+- [x] **远程访问就绪**: RB3 Gen2 Vision Kit 远程 ADB 可用，见 [REMOTE-ACCESS.md](REMOTE-ACCESS.md)
+- [x] **板子已确认**: Vision Kit (不是 Core Kit), QIMP SDK, 当前内核 6.6.28
 - [ ] **Step 0**: linux-dovetail x86_64 + Xenomai 基线验证 (在 QEMU 跑 latency)
 - [ ] **Step 1**: qcom x86_64 练手 (熟悉 git am 冲突处理)
 - [ ] **Step 2**: qcom ARM64 正式打补丁
 - [ ] **Step 3**: 编译通过 + QCOM 特有适配
 - [ ] **Step 4**: Yocto layer 化
+
+### 远程板子信息
+
+| 项目 | 值 |
+|------|-----|
+| 型号 | RB3 Gen2 **Vision Kit** (带 Vision Mezzanine + 双摄像头) |
+| SDK | **QIMP** (Qualcomm Intelligent Multimedia Product) |
+| DISTRO | `qcom-wayland 1.0` |
+| 当前内核 | `6.6.28-01890-g350dfd604d2f` (2024-06-19, PREEMPT) |
+| MACHINE (Yocto) | `qcs6490-rb3gen2-vision-kit` |
+| USB 访问 | 05c6:9135, 3 interfaces (DIAG + QMI + ADB), 无 CDC ACM 串口 |
+| 串口 console | **暂缺**, 需物理 UART 线 → 向客户申请 |
 
 → 详细操作命令见 **[STEP-BY-STEP.md](STEP-BY-STEP.md)**
