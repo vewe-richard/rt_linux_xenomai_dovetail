@@ -8,11 +8,25 @@ ssh -p 10003 root@localhost
 # 如果网络不通: ip link set enp0s3 up && dhclient enp0s3
 ```
 
+## ⚠️ 重要发现 (2026-05-11)
+
+**Alchemy API 不可用** (copperplate 初始化 bug): `rt_task_create()` 在 libcopperplate
+初始化时 segfault，原因追踪到 `--enable-pshared` 导致的共享堆初始化路径有 NULL 指针
+访问 (`add_free_range` 函数)。即使去掉 `--enable-pshared`，copperplate init 仍然崩溃。
+
+**解决方案**: 使用 **Cobalt 原生扩展 POSIX API**（`pthread_create_ex()` + `clock_nanosleep()`）。
+`/usr/xenomai/bin/latency` 用的就是这条路。Cobalt 原生 API 绕过 copperplate 和 alchemy，
+直接与 libcobalt 通信。
+
+参考 API:
+- 线程创建: `pthread_attr_init_ex()` / `pthread_create_ex()`
+- 睡眠: `clock_nanosleep()` (Cobalt 自动拦截)
+- 主模式切换: `cobalt_thread_harden()`
+- 初始化: `xenomai_init(&argc, &argv)`
+
 ## 实验 1 — 感受优先级墙：Linux 任务 vs Xenomai RT 任务
 
-写两个程序，同时跑：
-
-### 1a. 先写一个 Linux 轰炸机
+### 1a. Linux 轰炸机
 
 ```bash
 # bomb.c — 纯 Linux 死循环，占满 CPU
@@ -26,67 +40,136 @@ EOF
 gcc /tmp/bomb.c -o /tmp/bomb
 ```
 
-### 1b. 再写一个 Xenomai RT 任务
+### 1b. Xenomai RT 任务 (Cobalt 原生 API, timerfd 方式)
+
+**重要**: 必须用 `timerfd` 做周期性唤醒（跟 `latency` 一样），不要用 `clock_nanosleep`。
+后者在 Cobalt oob 模式下配合 printf 的模式切换可能导致线程永久阻塞。
 
 ```bash
-# rt-sec.c — 每秒打印一行，用 Xenomai 时钟
-cat > /tmp/rt-sec.c << 'EOF'
-#include <alchemy/task.h>
-#include <alchemy/timer.h>
+# rt-demo.c — 每秒打印一行，用 timerfd 做周期性唤醒
+cat > /tmp/rt-demo.c << 'EOF'
+#define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/timerfd.h>
+#include <xenomai/init.h>
+#include <cobalt/sys/cobalt.h>
 
-RT_TASK task;
-int stop = 0;
+static volatile int stop = 0;
+static void handle_sig(int sig) { stop = 1; }
 
-void handler(int sig) { stop = 1; }
+static void *rt_thread(void *arg)
+{
+    struct timespec now;
+    struct itimerspec it;
+    int tfd, count = 0;
+    unsigned long long overruns;
 
-void demo(void *arg) {
-    RTIME now;
-    int count = 0;
+    cobalt_thread_harden();  /* oob 主模式 */
+
+    /* 创建单调 timerfd */
+    tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+
+    /* 第一次 1 秒后触发，之后每 1 秒 */
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    it.it_value.tv_sec  = now.tv_sec + 1;
+    it.it_value.tv_nsec = now.tv_nsec;
+    it.it_interval.tv_sec  = 1;
+    it.it_interval.tv_nsec = 0;
+    timerfd_settime(tfd, TFD_TIMER_ABSTIME, &it, NULL);
+
     while (!stop) {
-        rt_task_sleep(1000000000ULL);  // 1 秒 (纳秒)
-        now = rt_timer_read();
-        rt_printf("[%d] RT task tick, time=%llu ns\n", ++count, now);
+        /* 阻塞直到 timer 触发 */
+        if (read(tfd, &overruns, sizeof(overruns)) != sizeof(overruns))
+            break;
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        count++;
+        printf("[%d] RT tick, time=%lld.%09ld%s\n",
+               count, (long long)now.tv_sec, now.tv_nsec,
+               overruns ? " OVERRUN" : "");
+        fflush(stdout);
     }
+
+    close(tfd);
+    return NULL;
 }
 
-int main() {
-    signal(SIGINT, handler);
-    rt_task_create(&task, "demo", 0, 99, T_JOINABLE);
-    rt_task_start(&task, &demo, NULL);
-    pause();
-    rt_task_join(&task);
+int main(int argc, char *argv[])
+{
+    pthread_attr_ex_t attr_ex;
+    struct sched_param_ex param_ex;
+    pthread_t thread;
+
+    xenomai_init(&argc, &argv);
+    printf("Xenomai Cobalt initialized\n");
+
+    pthread_attr_init_ex(&attr_ex);
+    pthread_attr_setinheritsched_ex(&attr_ex, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy_ex(&attr_ex, SCHED_FIFO);
+    param_ex.sched_priority = 80;
+    pthread_attr_setschedparam_ex(&attr_ex, &param_ex);
+
+    signal(SIGINT, handle_sig);
+    signal(SIGTERM, handle_sig);
+
+    pthread_create_ex(&thread, &attr_ex, rt_thread, NULL);
+    pthread_attr_destroy_ex(&attr_ex);
+
+    printf("RT thread created, Ctrl-C to stop\n");
+    pthread_join(thread, NULL);
+    printf("Done.\n");
     return 0;
 }
 EOF
-gcc /tmp/rt-sec.c -o /tmp/rt-sec -I/usr/xenomai/include \
-  -L/usr/xenomai/lib -lalchemy -lxenomai -lpthread -lrt
+gcc /tmp/rt-demo.c -o /tmp/rt-demo \
+  -I/usr/xenomai/include/cobalt -I/usr/xenomai/include \
+  -L/usr/xenomai/lib -Wl,-rpath,/usr/xenomai/lib \
+  -lcobalt -lpthread -lrt
 ```
 
-### 1c. 实验过程
+**编译库说明**: 只有 `-lcobalt -lpthread -lrt`，不需要 `-lalchemy -lcopperplate`。
+
+### 1c. RT + 负载隔离测试 (完整版)
 
 ```bash
-# 终端 1: 先让 RT 任务跑起来
-export LD_LIBRARY_PATH=/usr/xenomai/lib
-/tmp/rt-sec
-# 你应该看到每秒一行:
-# [1] RT task tick, time=XXXX ns
-# [2] RT task tick, time=XXXX ns
-# ...
-
-# 终端 2: SSH 再开一个，启动轰炸机
-ssh -p 10003 root@localhost
-# 看 CPU 核数
-nproc
-# 启动 N+1 个轰炸机占满所有核
-for i in $(seq 1 5); do /tmp/bomb & done
+# rt-load.c — RT 100ms 周期任务 + 全核 Linux CPU 烧机
+# 代码在 /root/xenomai/rt-load.c，编译:
+cd /root/xenomai && ./build.sh
 ```
 
-**观察**：终端 1 里的 RT task 还在准时每秒打印吗？这就是 dovetail 的核心能力 — Xenomai RT 任务不受 Linux 负载影响，即使 Linux CPU 100% 满载。
+### 1d. 实验过程
 
-Ctrl+C 停止 RT task，然后 `killall bomb`。
+```bash
+# 终端 1: 跑 RT load 测试 (RT periodic + CPU burners)
+/root/xenomai/rt-load
+# 应该看到:
+#   RT task started (CPU0, prio=80, period=100ms)
+#   Starting 4 CPU burners...
+#     CPU 0: reserved for RT
+#     CPU 1: burner started
+#     CPU 2: burner started
+#     CPU 3: burner started
+#   Running... Press Ctrl-C to stop
+#   [RT] count=10, last interval=100000123 ns (target 100000000 ns)
+#   [RT] count=20, last interval=100000042 ns (target 100000000 ns)
+
+# 终端 2: 同時看延迟
+ssh -p 10003 root@localhost
+cat /proc/xenomai/latency
+# 在满载下 latency 应该仍然稳定
+```
+
+**观察**：RT 任务的 interval 始终接近 100ms，不受 Linux CPU 100% 影响。
+误差在 ~100ns 级别（虚拟化环境）。这就是 dovetail 的核心能力 — oob 域和 in-band
+域完全隔离。Linux 看到自己"满载"，Xenomai RT 任务不受影响。
+
+Ctrl+C 停止。
 
 ## 实验 2 — 看 /proc/xenomai/ 里有什么
 
@@ -140,9 +223,10 @@ ls
 ## 核心认知回顾
 
 ```
-你的 RT task (/tmp/rt-sec)
-    优先级: 99 (Xenomai 最高)
-    运行在: oob 阶段
+你的 RT task (rt-load / rt-demo)
+    优先级: 80 (SCHED_FIFO, Xenomai oob)
+    运行在: oob 阶段 (cobalt_thread_harden 后)
+    API: pthread_create_ex() + clock_nanosleep()
            ↑
     ─────── pipeline 界线 ───────
            ↓
@@ -153,6 +237,20 @@ ls
 ```
 
 这就是 dovetail 存在的意义：**oob 域和 in-band 域完全隔离**。Linux 看到自己"满载"，Xenomai RT 任务不受影响。
+
+## API 选择备忘
+
+| API 层 | 头文件 | 线程创建 | 睡眠 | 状态 |
+|--------|--------|----------|------|------|
+| **Cobalt 扩展 POSIX** | `<cobalt/sys/cobalt.h>` (pthread.h/time.h 自动拦截) | `pthread_create_ex()` | `timerfd_create()` + `timerfd_settime(TFD_TIMER_ABSTIME)` + `read()` | ✅ 可用 (latency 同款) |
+| **Alchemy** | `<alchemy/task.h>` | `rt_task_create()` | `rt_task_sleep()` | ❌ copperplate init bug |
+| **Cobalt 裸 API** | `<xenomai/init.h>` | 手动 syscall | 手动 syscall | ✅ 可用但不建议 |
+
+### 编译需要的库 (Cobalt 原生)
+```
+-lcobalt -lpthread -lrt
+```
+NOT: `-lalchemy -lcopperplate` (这些会触发 copperplate init bug)
 
 ## 如果还想继续深入
 

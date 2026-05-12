@@ -6,6 +6,7 @@ meta-qcom-realtime/
 
 # Build output
 build/
+logs/
 
 # Swap files
 *.swp

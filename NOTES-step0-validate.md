@@ -125,3 +125,16 @@ ssh -p 10003 root@localhost
 /usr/xenomai/bin/latency
 # 如果 lib 找不到: ldconfig
 ```
+
+## 用户态 API 验证结果 (2026-05-11)
+
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| Cobalt 扩展 POSIX API | ✅ | `pthread_create_ex()` + `clock_nanosleep()` 正常 |
+| latency 工具 | ✅ | 可用，直接用 Cobalt 原生 API |
+| Alchemy API (rt_task_create) | ❌ | copperplate 初始化 segfault |
+| copperplate init | ❌ | `add_free_range()` NULL 指针，`--enable-pshared` 相关 |
+| 编译库 (Cobalt 原生) | `-lcobalt -lpthread -lrt` | 不需要 `-lalchemy -lcopperplate` |
+
+**结论**: 在本教程中所有实验使用 Cobalt 扩展 POSIX API（与 latency 相同路径）。
+后续 Phase 2-4 需要追查 copperplate init bug 或改用 Cobalt 原生路径。
