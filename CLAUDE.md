@@ -20,6 +20,7 @@ Git/curl/bitbake 等工具需通过以上代理访问外网。`~/start-claude-wi
 - Richard prefers reading Chinese, but may write questions in English
 - Claude should reply in Chinese by default; switch to English if Richard uses English
 - 回答用中文，代码和命令保持英文
+- Richard 学习 Xenomai / Dovetail 概念时：快速直接回答，不要去搜代码、搜文件、或者做跟问题无关的重型操作
 
 ## OCR Screenshot Tool — 图片文字提取
 
