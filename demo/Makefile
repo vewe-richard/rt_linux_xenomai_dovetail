@@ -2,7 +2,8 @@
 # Place in /root/xenomai/ on the VM
 
 # === CONFIG ==========================================
-XENO_PREFIX  ?= ../xenomai
+# Auto-detect: VM has /usr/xenomai, host uses ../xenomai
+XENO_PREFIX  ?= $(if $(wildcard /usr/xenomai/include/.),/usr/xenomai,../xenomai)
 XENO_CFLAGS  := -I$(XENO_PREFIX)/include -I$(XENO_PREFIX)/include/cobalt
 XENO_LDFLAGS := -L$(XENO_PREFIX)/lib -Wl,-rpath,$(XENO_PREFIX)/lib
 XENO_LIBS    := -lcobalt -lpthread -lrt
