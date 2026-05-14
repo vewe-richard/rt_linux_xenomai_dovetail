@@ -343,7 +343,7 @@ Layer 1: 架构适配 (ARM64/ARM/x86 的 syscall/trap/fpu 重路由)
 - [x] Versions identified: dovetail 6.6.69, qcom 6.6.119
 - [x] Reference layer (meta-qcom-realtime) analyzed
 - [x] **Phase 1 done**: 提取 Dovetail 补丁 (171 patches + 8 merge refs + 1 combined diff)
-- [x] **远程访问就绪**: RB3 Gen2 Vision Kit 远程 ADB 可用，见 [REMOTE-ACCESS.md](REMOTE-ACCESS.md)
+- [x] **远程访问就绪**: RB3 Gen2 Vision Kit 远程 ADB 可用，见 [REMOTE-ACCESS.md](notes/boardcontrol/REMOTE-ACCESS.md)
 - [x] **板子已确认**: Vision Kit (不是 Core Kit), QIMP SDK, 当前内核 6.6.28
 - [ ] **Step 0**: linux-dovetail x86_64 + Xenomai 基线验证 (在 QEMU 跑 latency)
 - [ ] **Step 1**: qcom x86_64 练手 (熟悉 git am 冲突处理)
