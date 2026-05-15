@@ -1,0 +1,158 @@
+From 5d0ea65063a737a076b47d4011c25b9dfc4af7d5 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 14 Sep 2018 09:57:59 +0200
+Subject: [PATCH 074/174] arm64: dovetail: enable alternate scheduling
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/include/asm/dovetail.h    | 21 +++++++++++++++++++++
+ arch/arm64/include/asm/efi.h         |  6 ++++++
+ arch/arm64/include/asm/mmu_context.h | 21 ++++++++++++++++++++-
+ arch/arm64/mm/context.c              | 11 ++++++++---
+ 4 files changed, 55 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/include/asm/dovetail.h b/arch/arm64/include/asm/dovetail.h
+index 66ee2be623ce..b3768bcfd96c 100644
+--- a/arch/arm64/include/asm/dovetail.h
++++ b/arch/arm64/include/asm/dovetail.h
+@@ -18,6 +18,27 @@
+ #define ARM64_TRAP_BTI		8	/* Branch target identification */
+ #define ARM64_TRAP_SME		9	/* SME access trap */
+ 
++#ifdef CONFIG_DOVETAIL
++
++static inline void arch_dovetail_exec_prepare(void)
++{ }
++
++static inline void arch_dovetail_switch_prepare(bool leave_inband)
++{ }
++
++static inline void arch_dovetail_switch_finish(bool enter_inband)
++{ }
++
++/*
++ * 172 is __NR_prctl from unistd32 in ARM32 mode, without #inclusion
++ * hell. At the end of the day, this number is written in stone to
++ * honor the ABI stability promise anyway.
++ */
++#define arch_dovetail_is_syscall(__nr)	\
++	(is_compat_task() ? (__nr) == 172 : (__nr) == __NR_prctl)
++
++#endif
++
+ /*
+  * Pass the trap event to the companion core. Return true if running
+  * in-band afterwards.
+diff --git a/arch/arm64/include/asm/efi.h b/arch/arm64/include/asm/efi.h
+index bcd5622aa096..34aaa6443282 100644
+--- a/arch/arm64/include/asm/efi.h
++++ b/arch/arm64/include/asm/efi.h
+@@ -120,6 +120,10 @@ extern unsigned long primary_entry_offset(void);
+ 
+ static inline void efi_set_pgd(struct mm_struct *mm)
+ {
++	unsigned long flags;
++
++	protect_inband_mm(flags);
++
+ 	__switch_mm(mm);
+ 
+ 	if (system_uses_ttbr0_pan()) {
+@@ -144,6 +148,8 @@ static inline void efi_set_pgd(struct mm_struct *mm)
+ 			update_saved_ttbr0(current, current->active_mm);
+ 		}
+ 	}
++
++	unprotect_inband_mm(flags);
+ }
+ 
+ void efi_virtmap_load(void);
+diff --git a/arch/arm64/include/asm/mmu_context.h b/arch/arm64/include/asm/mmu_context.h
+index 5672e5a9ff64..e3daa9ce8bf5 100644
+--- a/arch/arm64/include/asm/mmu_context.h
++++ b/arch/arm64/include/asm/mmu_context.h
+@@ -16,6 +16,7 @@
+ #include <linux/sched/hotplug.h>
+ #include <linux/mm_types.h>
+ #include <linux/pgtable.h>
++#include <linux/irq_pipeline.h>
+ 
+ #include <asm/cacheflush.h>
+ #include <asm/cpufeature.h>
+@@ -275,7 +276,7 @@ static inline void __switch_mm(struct mm_struct *next)
+ }
+ 
+ static inline void
+-switch_mm(struct mm_struct *prev, struct mm_struct *next,
++do_switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 	  struct task_struct *tsk)
+ {
+ 	if (prev != next)
+@@ -290,6 +291,24 @@ switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 	update_saved_ttbr0(tsk, next);
+ }
+ 
++static inline void
++switch_mm(struct mm_struct *prev, struct mm_struct *next,
++	  struct task_struct *tsk)
++{
++	unsigned long flags;
++
++	protect_inband_mm(flags);
++	do_switch_mm(prev, next, tsk);
++	unprotect_inband_mm(flags);
++}
++
++static inline void
++switch_oob_mm(struct mm_struct *prev, struct mm_struct *next,
++	      struct task_struct *tsk) /* hard irqs off */
++{
++	do_switch_mm(prev, next, tsk);
++}
++
+ static inline const struct cpumask *
+ task_cpu_possible_mask(struct task_struct *p)
+ {
+diff --git a/arch/arm64/mm/context.c b/arch/arm64/mm/context.c
+index b2ac06246327..5fd97df8b5ea 100644
+--- a/arch/arm64/mm/context.c
++++ b/arch/arm64/mm/context.c
+@@ -18,7 +18,7 @@
+ #include <asm/tlbflush.h>
+ 
+ static u32 asid_bits;
+-static DEFINE_RAW_SPINLOCK(cpu_asid_lock);
++static DEFINE_HARD_SPINLOCK(cpu_asid_lock);
+ 
+ static atomic64_t asid_generation;
+ static unsigned long *asid_map;
+@@ -217,6 +217,9 @@ void check_and_switch_context(struct mm_struct *mm)
+ 	unsigned long flags;
+ 	unsigned int cpu;
+ 	u64 asid, old_active_asid;
++	bool need_flush;
++
++	WARN_ON_ONCE(dovetail_debug() && !hard_irqs_disabled());
+ 
+ 	if (system_supports_cnp())
+ 		cpu_set_reserved_ttbr0();
+@@ -252,12 +255,14 @@ void check_and_switch_context(struct mm_struct *mm)
+ 	}
+ 
+ 	cpu = smp_processor_id();
+-	if (cpumask_test_and_clear_cpu(cpu, &tlb_flush_pending))
+-		local_flush_tlb_all();
++	need_flush = cpumask_test_and_clear_cpu(cpu, &tlb_flush_pending);
+ 
+ 	atomic64_set(this_cpu_ptr(&active_asids), asid);
+ 	raw_spin_unlock_irqrestore(&cpu_asid_lock, flags);
+ 
++	if (need_flush)
++		local_flush_tlb_all();
++
+ switch_mm_fastpath:
+ 
+ 	arm64_apply_bp_hardening();
+-- 
+2.43.0
+

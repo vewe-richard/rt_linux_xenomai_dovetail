@@ -1,0 +1,97 @@
+From 51ff54469ea5c340c7634bafadab8025d5e7230d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 18 Feb 2017 14:41:32 +0100
+Subject: [PATCH 037/174] ARM: imx/gpc: irq_pipeline: enable interrupt pipeline
+ control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/mach-imx/gpc.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/arch/arm/mach-imx/gpc.c b/arch/arm/mach-imx/gpc.c
+index 5909088d5482..8255eab95bbc 100644
+--- a/arch/arm/mach-imx/gpc.c
++++ b/arch/arm/mach-imx/gpc.c
+@@ -62,28 +62,38 @@ void imx_gpc_set_l2_mem_power_in_lpm(bool power_off)
+ void imx_gpc_pre_suspend(bool arm_power_off)
+ {
+ 	void __iomem *reg_imr1 = gpc_base + GPC_IMR1;
++	unsigned long flags;
+ 	int i;
+ 
+ 	/* Tell GPC to power off ARM core when suspend */
+ 	if (arm_power_off)
+ 		imx_gpc_set_arm_power_in_lpm(arm_power_off);
+ 
++	flags = hard_cond_local_irq_save();
++
+ 	for (i = 0; i < IMR_NUM; i++) {
+ 		gpc_saved_imrs[i] = readl_relaxed(reg_imr1 + i * 4);
+ 		writel_relaxed(~gpc_wake_irqs[i], reg_imr1 + i * 4);
+ 	}
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ void imx_gpc_post_resume(void)
+ {
+ 	void __iomem *reg_imr1 = gpc_base + GPC_IMR1;
++	unsigned long flags;
+ 	int i;
+ 
+ 	/* Keep ARM core powered on for other low-power modes */
+ 	imx_gpc_set_arm_power_in_lpm(false);
+ 
++	flags = hard_cond_local_irq_save();
++
+ 	for (i = 0; i < IMR_NUM; i++)
+ 		writel_relaxed(gpc_saved_imrs[i], reg_imr1 + i * 4);
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ static int imx_gpc_irq_set_wake(struct irq_data *d, unsigned int on)
+@@ -105,21 +115,31 @@ static int imx_gpc_irq_set_wake(struct irq_data *d, unsigned int on)
+ void imx_gpc_mask_all(void)
+ {
+ 	void __iomem *reg_imr1 = gpc_base + GPC_IMR1;
++	unsigned long flags;
+ 	int i;
+ 
++	flags = hard_cond_local_irq_save();
++
+ 	for (i = 0; i < IMR_NUM; i++) {
+ 		gpc_saved_imrs[i] = readl_relaxed(reg_imr1 + i * 4);
+ 		writel_relaxed(~0, reg_imr1 + i * 4);
+ 	}
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ void imx_gpc_restore_all(void)
+ {
+ 	void __iomem *reg_imr1 = gpc_base + GPC_IMR1;
++	unsigned long flags;
+ 	int i;
+ 
++	flags = hard_cond_local_irq_save();
++
+ 	for (i = 0; i < IMR_NUM; i++)
+ 		writel_relaxed(gpc_saved_imrs[i], reg_imr1 + i * 4);
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ void imx_gpc_hwirq_unmask(unsigned int hwirq)
+@@ -167,6 +187,7 @@ static struct irq_chip imx_gpc_chip = {
+ #ifdef CONFIG_SMP
+ 	.irq_set_affinity	= irq_chip_set_affinity_parent,
+ #endif
++	.flags			= IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static int imx_gpc_domain_translate(struct irq_domain *d,
+-- 
+2.43.0
+

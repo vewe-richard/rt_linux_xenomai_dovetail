@@ -1,0 +1,313 @@
+From 433058e406ca8712f7ff9f93b4e5b42c83a4fb13 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 24 Nov 2023 12:09:27 +0100
+Subject: [PATCH 117/174] genirq: irq_pipeline: fix boot hang w/ IRQ_PIPELINE
+ off
+
+Disabling the pipeline entirely caused the percpu IRQ handlers to run
+left-over portions of oob handling. At this chance, clean up some
+uselessly intrusive code.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ kernel/irq/chip.c      | 167 +++++++++++++++++++++++------------------
+ kernel/irq/handle.c    |  32 --------
+ kernel/irq/internals.h |   1 -
+ 3 files changed, 96 insertions(+), 104 deletions(-)
+
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index 37478a5542c3..5066b2c938c6 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -413,18 +413,6 @@ void irq_percpu_disable(struct irq_desc *desc, unsigned int cpu)
+ 	cpumask_clear_cpu(cpu, desc->percpu_enabled);
+ }
+ 
+-#ifdef CONFIG_IRQ_PIPELINE
+-void irq_clear_deferral(struct irq_desc *desc)
+-{
+-	desc->istate &= ~IRQS_DEFERRED;
+-}
+-
+-void irq_clear_forward(struct irq_desc *desc)
+-{
+-	desc->istate &= ~IRQS_FORWARDED;
+-}
+-#endif
+-
+ static inline void mask_ack_irq(struct irq_desc *desc)
+ {
+ 	if (desc->irq_data.chip->irq_mask_ack) {
+@@ -525,6 +513,48 @@ enum {
+ 	IRQ_FLOW_FORWARD,
+ };
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++
++static inline bool may_start_flow(int flow)
++{
++	return flow != IRQ_FLOW_REPLAY && flow != IRQ_FLOW_FORWARD;
++}
++
++void irq_clear_deferral(struct irq_desc *desc)
++{
++	desc->istate &= ~IRQS_DEFERRED;
++}
++
++void irq_clear_forward(struct irq_desc *desc)
++{
++	desc->istate &= ~IRQS_FORWARDED;
++}
++
++static irqreturn_t forward_irq_event(struct irq_desc *desc)
++{
++	irqreturn_t ret;
++
++	raw_spin_unlock(&desc->lock);
++	ret = handle_irq_event_percpu(desc);
++	raw_spin_lock(&desc->lock);
++
++	return ret;
++}
++
++#else
++
++static inline bool may_start_flow(int flow)
++{
++	return true;
++}
++
++irqreturn_t forward_irq_event(struct irq_desc *desc)
++{
++	return IRQ_NONE;
++}
++
++#endif
++
+ /*
+  * get_flow_step - Determine which step of the interrupt flow handling
+  * we are in.
+@@ -626,11 +656,6 @@ static inline bool should_feed_pipeline(struct irq_desc *desc, int state)
+ 	return false;
+ }
+ 
+-static inline bool may_start_flow(int flow)
+-{
+-	return flow != IRQ_FLOW_REPLAY && flow != IRQ_FLOW_FORWARD;
+-}
+-
+ static bool irq_may_run(struct irq_desc *desc)
+ {
+ 	unsigned int mask = IRQD_IRQ_INPROGRESS | IRQD_WAKEUP_ARMED;
+@@ -743,16 +768,19 @@ void handle_untracked_irq(struct irq_desc *desc)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (flow != IRQ_FLOW_FORWARD) {
+-		desc->istate &= ~(IRQS_REPLAY | IRQS_WAITING);
++	if (flow == IRQ_FLOW_FORWARD) {
++		forward_irq_event(desc);
++		goto out_unlock;
++	}
+ 
+-		if (unlikely(!desc->action || irqd_irq_disabled(&desc->irq_data))) {
+-			desc->istate |= IRQS_PENDING;
+-			goto out_unlock;
+-		}
++	desc->istate &= ~(IRQS_REPLAY | IRQS_WAITING);
+ 
+-		desc->istate &= ~IRQS_PENDING;
++	if (unlikely(!desc->action || irqd_irq_disabled(&desc->irq_data))) {
++		desc->istate |= IRQS_PENDING;
++		goto out_unlock;
+ 	}
++
++	desc->istate &= ~IRQS_PENDING;
+ 	irqd_set(&desc->irq_data, IRQD_IRQ_INPROGRESS);
+ 	raw_spin_unlock(&desc->lock);
+ 
+@@ -1160,42 +1188,39 @@ void handle_percpu_irq(struct irq_desc *desc)
+ 	bool handled;
+ 	int flow;
+ 
+-	flow = get_flow_step(desc);
+-	if (may_start_flow(flow)) {
+-		if (chip->irq_ack)
+-			chip->irq_ack(&desc->irq_data);
+-		handled = handle_oob_irq(desc);
+-		if (chip->irq_eoi)
+-			chip->irq_eoi(&desc->irq_data);
+-		if (!handled && chip->irq_mask)
+-			chip->irq_mask(&desc->irq_data);
+-		return;
+-	}
+-
+-	if (flow == IRQ_FLOW_FORWARD) {
+-		handle_irq_event_percpu(desc);
+-		return;
+-	}
+-
+-	/*
+-	 * PER CPU interrupts are not serialized. Do not touch
+-	 * desc->tot_count.
+-	 */
+-	__kstat_incr_irqs_this_cpu(desc);
+-
+ 	if (irqs_pipelined()) {
+-		handle_irq_event_percpu(desc);
+-		if (chip->irq_unmask) {
++		flow = get_flow_step(desc);
++		if (may_start_flow(flow)) {
++			if (chip->irq_ack)
++				chip->irq_ack(&desc->irq_data);
++			handled = handle_oob_irq(desc);
++			if (chip->irq_eoi)
++				chip->irq_eoi(&desc->irq_data);
++			if (!handled && chip->irq_mask)
++				chip->irq_mask(&desc->irq_data);
++		} else if (flow == IRQ_FLOW_FORWARD) {
++			handle_irq_event_percpu(desc);
++		} else {
++			__kstat_incr_irqs_this_cpu(desc);
++			handle_irq_event_percpu(desc);
+ 			/*
+ 			 * irqchip handlers assume that hard irqs are
+ 			 * off, which is not the case on replay of
+ 			 * unserialized percpu irqs: fix this up.
+ 			 */
+-			flags = hard_cond_local_irq_save();
+-			chip->irq_unmask(&desc->irq_data);
+-			hard_cond_local_irq_restore(flags);
++			if (chip->irq_unmask) {
++				flags = hard_cond_local_irq_save();
++				chip->irq_unmask(&desc->irq_data);
++				hard_cond_local_irq_restore(flags);
++			}
+ 		}
+ 	} else {
++		/*
++		 * PER CPU interrupts are not serialized. Do not touch
++		 * desc->tot_count.
++		 */
++		__kstat_incr_irqs_this_cpu(desc);
++
+ 		if (chip->irq_ack)
+ 			chip->irq_ack(&desc->irq_data);
+ 		handle_irq_event_percpu(desc);
+@@ -1226,20 +1251,22 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 	int flow;
+ 
+ 	flow = get_flow_step(desc);
+-	if (may_start_flow(flow)) {
+-		if (chip->irq_ack)
+-			chip->irq_ack(&desc->irq_data);
+-		handled = handle_oob_irq(desc);
+-		if (chip->irq_eoi)
+-			chip->irq_eoi(&desc->irq_data);
+-		if (!handled && chip->irq_mask)
+-			chip->irq_mask(&desc->irq_data);
+-		return;
+-	}
+-
+-	if (flow == IRQ_FLOW_FORWARD) {
+-		handle_irq_event_percpu(desc);
+-		return;
++	if (irqs_pipelined()) {
++		if (may_start_flow(flow)) {
++			if (chip->irq_ack)
++				chip->irq_ack(&desc->irq_data);
++			handled = handle_oob_irq(desc);
++			if (chip->irq_eoi)
++				chip->irq_eoi(&desc->irq_data);
++			if (!handled && chip->irq_mask)
++				chip->irq_mask(&desc->irq_data);
++			return;
++		} else if (flow == IRQ_FLOW_FORWARD) {
++			handle_irq_event_percpu(desc);
++			return;
++		}
++	} else if (chip->irq_ack) {
++		chip->irq_ack(&desc->irq_data);
+ 	}
+ 
+ 	/*
+@@ -1248,9 +1275,6 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 	 */
+ 	__kstat_incr_irqs_this_cpu(desc);
+ 
+-	if (!irqs_pipelined() && chip->irq_ack)
+-		chip->irq_ack(&desc->irq_data);
+-
+ 	if (likely(action)) {
+ 		trace_irq_handler_entry(irq, action);
+ 		res = action->handler(irq, raw_cpu_ptr(action->percpu_dev_id));
+@@ -1276,8 +1300,9 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 		if (chip->irq_unmask)
+ 			chip->irq_unmask(&desc->irq_data);
+ 		hard_cond_local_irq_restore(flags);
+-	} else if (chip->irq_eoi)
+-			chip->irq_eoi(&desc->irq_data);
++	} else if (chip->irq_eoi) {
++		chip->irq_eoi(&desc->irq_data);
++	}
+ }
+ 
+ /**
+diff --git a/kernel/irq/handle.c b/kernel/irq/handle.c
+index 9673bd05b594..a6c90482d568 100644
+--- a/kernel/irq/handle.c
++++ b/kernel/irq/handle.c
+@@ -221,38 +221,6 @@ irqreturn_t handle_irq_event(struct irq_desc *desc)
+ 	return ret;
+ }
+ 
+-/*
+- * forward_irq_event - When pipelining is enabled, this call forwards
+- * a device-originated IRQ event to the in-band action handlers after
+- * out-of-band handling. Otherwise, this is a strict alias to
+- * handle_irq_event().
+- *
+- * IRQ forwarding is meant as a way to implement a two-step handling
+- * of any interrupt event: initially from the out-of-band stage where
+- * proper ack is sent to the device by the associated action
+- * handler(s), deferring the final handling to the same handler(s)
+- * called from the in-band stage eventually. Logically speaking, the
+- * interrupt is no more in progress once the out-of-band handler has
+- * returned.
+- *
+- * NOTE: per-cpu events can be forwarded as well, but we may invoke
+- * handle_irq_event_percpu() directly to achieve this.
+- */
+-irqreturn_t forward_irq_event(struct irq_desc *desc)
+-{
+-	irqreturn_t ret;
+-
+-	if (irqs_pipelined()) {
+-		raw_spin_unlock(&desc->lock);
+-		ret = handle_irq_event_percpu(desc);
+-		raw_spin_lock(&desc->lock);
+-	} else {
+-		ret = handle_irq_event(desc);
+-	}
+-
+-	return ret;
+-}
+-
+ #ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
+ int __init set_handle_irq(void (*handle_irq)(struct pt_regs *))
+ {
+diff --git a/kernel/irq/internals.h b/kernel/irq/internals.h
+index 2dfdf4fade22..32d6ef7bab71 100644
+--- a/kernel/irq/internals.h
++++ b/kernel/irq/internals.h
+@@ -117,7 +117,6 @@ extern int __irq_get_irqchip_state(struct irq_data *data,
+ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc);
+ irqreturn_t handle_irq_event_percpu(struct irq_desc *desc);
+ irqreturn_t handle_irq_event(struct irq_desc *desc);
+-irqreturn_t forward_irq_event(struct irq_desc *desc);
+ 
+ /* Resending of interrupts :*/
+ int check_irq_resend(struct irq_desc *desc, bool inject);
+-- 
+2.43.0
+

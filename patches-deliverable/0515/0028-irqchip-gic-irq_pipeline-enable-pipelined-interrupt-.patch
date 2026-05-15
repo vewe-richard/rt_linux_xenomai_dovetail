@@ -1,0 +1,47 @@
+From 84de3e518a4568866f18cfdff4433232c3d76410 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 20 Feb 2017 19:18:09 +0100
+Subject: [PATCH 028/174] irqchip/gic: irq_pipeline: enable pipelined interrupt
+ control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/irqchip/irq-gic.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/irqchip/irq-gic.c b/drivers/irqchip/irq-gic.c
+index 2c6c50348afd..0e3a8951b95e 100644
+--- a/drivers/irqchip/irq-gic.c
++++ b/drivers/irqchip/irq-gic.c
+@@ -88,7 +88,7 @@ struct gic_chip_data {
+ 
+ #ifdef CONFIG_BL_SWITCHER
+ 
+-static DEFINE_RAW_SPINLOCK(cpu_map_lock);
++static DEFINE_HARD_SPINLOCK(cpu_map_lock);
+ 
+ #define gic_lock_irqsave(f)		\
+ 	raw_spin_lock_irqsave(&cpu_map_lock, (f))
+@@ -893,7 +893,8 @@ static const struct irq_chip gic_chip = {
+ 	.irq_print_chip		= gic_irq_print_chip,
+ 	.flags			= IRQCHIP_SET_TYPE_MASKED |
+ 				  IRQCHIP_SKIP_SET_WAKE |
+-				  IRQCHIP_MASK_ON_SUSPEND,
++				  IRQCHIP_MASK_ON_SUSPEND |
++				  IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static const struct irq_chip gic_chip_mode1 = {
+@@ -910,7 +911,8 @@ static const struct irq_chip gic_chip_mode1 = {
+ 	.irq_set_vcpu_affinity	= gic_irq_set_vcpu_affinity,
+ 	.flags			= IRQCHIP_SET_TYPE_MASKED |
+ 				  IRQCHIP_SKIP_SET_WAKE |
+-				  IRQCHIP_MASK_ON_SUSPEND,
++				  IRQCHIP_MASK_ON_SUSPEND |
++				  IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ #ifdef CONFIG_BL_SWITCHER
+-- 
+2.43.0
+

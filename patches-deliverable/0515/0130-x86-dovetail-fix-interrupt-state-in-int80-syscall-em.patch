@@ -1,0 +1,27 @@
+From bab3ac8f8b42055268a0a30ca1789f94a3ea3c07 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 17 May 2024 14:28:46 +0200
+Subject: [PATCH 130/174] x86: dovetail: fix interrupt state in int80 syscall
+ emulation
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/entry/common.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 3221038124f8..259aba6167e9 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -210,7 +210,7 @@ __visible noinstr void do_int80_emulation(struct pt_regs *regs)
+ 
+ 	nr = syscall_32_enter(regs);
+ 
+-	local_irq_enable();
++	local_irq_enable_full();
+ 	nr = syscall_enter_from_user_mode_work(regs, nr);
+ 
+ 	if (dovetailing()) {
+-- 
+2.43.0
+

@@ -1,0 +1,92 @@
+From 2b5e1fae69ede802d87515ee621602129e71c724 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 21 Sep 2023 12:31:56 +0200
+Subject: [PATCH 103/174] genirq: irq_pipeline: fix inconsistent lockdep check
+
+Acquiring hard locks from inband entails disabling hard irqs without
+requiring to stall the stage.
+
+Fix false positives w/ DEBUG_HARD_LOCKS on in check_flags() according
+to this case.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/irqstage.h | 7 ++++---
+ kernel/irq/pipeline.c    | 7 ++++---
+ kernel/locking/lockdep.c | 6 ++++--
+ 3 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/include/linux/irqstage.h b/include/linux/irqstage.h
+index a73b91e90972..5fb6b7037aed 100644
+--- a/include/linux/irqstage.h
++++ b/include/linux/irqstage.h
+@@ -318,7 +318,7 @@ static __always_inline void oob_irq_restore(unsigned long x)
+ 
+ bool stage_disabled(void);
+ 
+-bool stage_disabled_flags(unsigned long irqstate);
++bool stage_disabled_flags(unsigned long irqstate, bool *stalled);
+ 
+ unsigned long test_and_lock_stage(int *irqsoff);
+ 
+@@ -367,9 +367,10 @@ static __always_inline bool stage_disabled(void)
+ 	return irqs_disabled();
+ }
+ 
+-static __always_inline bool stage_disabled_flags(unsigned long flags)
++static __always_inline bool stage_disabled_flags(unsigned long flags, bool *stalled)
+ {
+-	return irqs_disabled_flags(flags);
++	*stalled = irqs_disabled_flags(flags);
++	return *stalled;
+ }
+ 
+ static __always_inline void irq_post_inband(unsigned int irq)
+diff --git a/kernel/irq/pipeline.c b/kernel/irq/pipeline.c
+index 886f9d63e570..98c532d58820 100644
+--- a/kernel/irq/pipeline.c
++++ b/kernel/irq/pipeline.c
+@@ -456,12 +456,13 @@ EXPORT_SYMBOL_GPL(stage_disabled);
+  *      though, since this is guaranteed by the implementation of
+  *      test_and_lock_stage().
+  */
+-noinstr bool stage_disabled_flags(unsigned long irqstate)
++noinstr bool stage_disabled_flags(unsigned long irqstate, bool *stalled)
+ {
+ 	unsigned long flags;
+-	int stalled;
++	int _stalled;
+ 
+-	flags = irqs_split_flags(irqstate, &stalled);
++	flags = irqs_split_flags(irqstate, &_stalled);
++	*stalled = _stalled;
+ 	return hard_irqs_disabled_flags(flags) || stalled;
+ }
+ EXPORT_SYMBOL_GPL(stage_disabled_flags);
+diff --git a/kernel/locking/lockdep.c b/kernel/locking/lockdep.c
+index 5de4a16fc646..49337d90a59d 100644
+--- a/kernel/locking/lockdep.c
++++ b/kernel/locking/lockdep.c
+@@ -5660,6 +5660,8 @@ static void __lock_unpin_lock(struct lockdep_map *lock, struct pin_cookie cookie
+ static noinstr void check_flags(unsigned long flags)
+ {
+ #if defined(CONFIG_PROVE_LOCKING) && defined(CONFIG_DEBUG_LOCKDEP)
++	bool stalled;
++
+ 	/*
+ 	 * irq_pipeline: we can't and don't want to check the
+ 	 * consistency of the irq tracer when running the interrupt
+@@ -5672,8 +5674,8 @@ static noinstr void check_flags(unsigned long flags)
+ 	/* Get the warning out..  */
+ 	instrumentation_begin();
+ 
+-	if (stage_disabled_flags(flags)) {
+-		if (DEBUG_LOCKS_WARN_ON(lockdep_hardirqs_enabled())) {
++	if (stage_disabled_flags(flags, &stalled)) {
++		if (DEBUG_LOCKS_WARN_ON(lockdep_hardirqs_enabled() && stalled)) {
+ 			printk("possible reason: unannotated irqs-off.\n");
+ 		}
+ 	} else {
+-- 
+2.43.0
+

@@ -1,0 +1,65 @@
+From 771906c623a198114efb3e36fbf89dace5b4a0ad Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 27 Mar 2021 19:58:54 +0100
+Subject: [PATCH 093/174] dovetail: add out-of-band open mode (O_OOB)
+
+We need a specific open mode denoting a user request for enabling
+out-of-band capabilities (if supported). This enables regular in-band
+drivers to be extended with such capabilities, turning them on upon
+user request for the files they manage.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ fs/fcntl.c                       | 2 +-
+ include/linux/fcntl.h            | 2 +-
+ include/uapi/asm-generic/fcntl.h | 8 ++++++++
+ 3 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/fs/fcntl.c b/fs/fcntl.c
+index 1484f062ee65..e1bd3f36def1 100644
+--- a/fs/fcntl.c
++++ b/fs/fcntl.c
+@@ -1021,7 +1021,7 @@ static int __init fcntl_init(void)
+ 	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
+ 	 * is defined as O_NONBLOCK on some platforms and not on others.
+ 	 */
+-	BUILD_BUG_ON(21 - 1 /* for O_RDONLY being 0 */ !=
++	BUILD_BUG_ON(22 - 1 /* for O_RDONLY being 0 */ !=
+ 		HWEIGHT32(
+ 			(VALID_OPEN_FLAGS & ~(O_NONBLOCK | O_NDELAY)) |
+ 			__FMODE_EXEC | __FMODE_NONOTIFY));
+diff --git a/include/linux/fcntl.h b/include/linux/fcntl.h
+index a332e79b3207..31d552753e43 100644
+--- a/include/linux/fcntl.h
++++ b/include/linux/fcntl.h
+@@ -10,7 +10,7 @@
+ 	(O_RDONLY | O_WRONLY | O_RDWR | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | \
+ 	 O_APPEND | O_NDELAY | O_NONBLOCK | __O_SYNC | O_DSYNC | \
+ 	 FASYNC	| O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | \
+-	 O_NOATIME | O_CLOEXEC | O_PATH | __O_TMPFILE)
++	 O_NOATIME | O_CLOEXEC | O_PATH | __O_TMPFILE | O_OOB)
+ 
+ /* List of all valid flags for the how->resolve argument: */
+ #define VALID_RESOLVE_FLAGS \
+diff --git a/include/uapi/asm-generic/fcntl.h b/include/uapi/asm-generic/fcntl.h
+index 80f37a0d40d7..5ff5c6ce4275 100644
+--- a/include/uapi/asm-generic/fcntl.h
++++ b/include/uapi/asm-generic/fcntl.h
+@@ -89,6 +89,14 @@
+ #define __O_TMPFILE	020000000
+ #endif
+ 
++/*
++ * Tells the open call that out-of-band operations should be enabled
++ * for the file (if supported).
++ */
++#ifndef O_OOB
++#define O_OOB		010000000000
++#endif
++
+ /* a horrid kludge trying to make sure that this will fail on old kernels */
+ #define O_TMPFILE (__O_TMPFILE | O_DIRECTORY)
+ 
+-- 
+2.43.0
+

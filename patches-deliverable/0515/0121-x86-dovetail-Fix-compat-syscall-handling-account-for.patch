@@ -1,0 +1,54 @@
+From c6baae085bc445cdd49d2f09d47aa6abe0ed41c2 Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Tue, 16 Apr 2024 12:24:36 +0200
+Subject: [PATCH 121/174] x86: dovetail: Fix compat syscall handling, account
+ for new IDT entry
+
+The following upstream commit introduces a new IDTENTRY for handling
+compat syscall. As that commit is now backported into stable trees it
+broke compat syscall handling for dovetail.
+
+be5341eb0d43 ("x86/entry: Convert INT 0x80 emulation to IDTENTRY")
+
+We no longer end up in do_int80_syscall_32() which has the dovetail
+specific bits. We need the same handling in asm_int80_emulation().
+
+The problematic part in asm_int80_emulation() is the call to
+do_syscall_32_irqs_on() which basically overwrites regs->ax
+unconditionally. Linux does not know about the co-kernel syscalls, so
+we get -ENOSYS for each syscall result.
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/x86/entry/common.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 0296f19a6c17..3db9fa5dc242 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -212,9 +212,21 @@ __visible noinstr void do_int80_emulation(struct pt_regs *regs)
+ 
+ 	local_irq_enable();
+ 	nr = syscall_enter_from_user_mode_work(regs, nr);
++
++	if (dovetailing()) {
++		if (nr == EXIT_SYSCALL_OOB) {
++			hard_local_irq_disable();
++			return;
++		}
++		if (nr == EXIT_SYSCALL_TAIL)
++			goto done;
++	}
++
+ 	do_syscall_32_irqs_on(regs, nr);
+ 
+ 	instrumentation_end();
++
++done:
+ 	syscall_exit_to_user_mode(regs);
+ }
+ #else /* CONFIG_IA32_EMULATION */
+-- 
+2.43.0
+

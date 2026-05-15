@@ -1,0 +1,93 @@
+From adb8ea9dacb9c611d35eadc1952053ff6ad998fb Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 18 Sep 2023 11:07:21 +0200
+Subject: [PATCH 100/174] genirq: irq_pipeline: protect irqchip handlers on
+ percpu irq replay
+
+irqchip handlers assume that hard irqs are off, which is not the case
+on replay of percpu irqs since we don't serialize the callers
+(i.e. desc->lock is not held).
+
+Make sure to hard disable irqs across calls to those handlers when
+replaying events.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ kernel/irq/chip.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index c6fd7f31d4ad..062c941101c4 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -1079,9 +1079,11 @@ void handle_edge_eoi_irq(struct irq_desc *desc)
+ void handle_percpu_irq(struct irq_desc *desc)
+ {
+ 	struct irq_chip *chip = irq_desc_get_chip(desc);
++	unsigned long flags;
+ 	bool handled;
+ 
+ 	if (on_pipeline_entry()) {
++		/* on_pipeline_entry() implies hard irqs off. */
+ 		if (chip->irq_ack)
+ 			chip->irq_ack(&desc->irq_data);
+ 		handled = handle_oob_irq(desc);
+@@ -1100,8 +1102,16 @@ void handle_percpu_irq(struct irq_desc *desc)
+ 
+ 	if (irqs_pipelined()) {
+ 		handle_irq_event_percpu(desc);
+-		if (chip->irq_unmask)
++		if (chip->irq_unmask) {
++			/*
++			 * irqchip handlers assume that hard irqs are
++			 * off, which is not the case on replay of
++			 * unserialized percpu irqs: fix this up.
++			 */
++			flags = hard_cond_local_irq_save();
+ 			chip->irq_unmask(&desc->irq_data);
++			hard_cond_local_irq_restore(flags);
++		}
+ 	} else {
+ 		if (chip->irq_ack)
+ 			chip->irq_ack(&desc->irq_data);
+@@ -1127,10 +1137,12 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 	struct irq_chip *chip = irq_desc_get_chip(desc);
+ 	struct irqaction *action = desc->action;
+ 	unsigned int irq = irq_desc_get_irq(desc);
++	unsigned long flags;
+ 	irqreturn_t res;
+ 	bool handled;
+ 
+ 	if (on_pipeline_entry()) {
++		/* on_pipeline_entry() implies hard irqs off. */
+ 		if (chip->irq_ack)
+ 			chip->irq_ack(&desc->irq_data);
+ 		handled = handle_oob_irq(desc);
+@@ -1166,8 +1178,15 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 	}
+ 
+ 	if (irqs_pipelined()) {
++		/*
++		 * irqchip handlers assume that hard irqs are off,
++		 * which is not the case on replay of unserialized
++		 * percpu irqs: fix this up.
++		 */
++		flags = hard_cond_local_irq_save();
+ 		if (chip->irq_unmask)
+ 			chip->irq_unmask(&desc->irq_data);
++		hard_cond_local_irq_restore(flags);
+ 	} else if (chip->irq_eoi)
+ 			chip->irq_eoi(&desc->irq_data);
+ }
+@@ -1179,6 +1198,8 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+  *
+  * Similar to handle_fasteoi_nmi, but handling the dev_id cookie
+  * as a percpu pointer.
++ *
++ * irq_pipeline: we never log & replay NMIs.
+  */
+ void handle_percpu_devid_fasteoi_nmi(struct irq_desc *desc)
+ {
+-- 
+2.43.0
+

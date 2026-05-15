@@ -1,0 +1,150 @@
+From d994e930c17ac45e91fab3acea83a030c1dd115c Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 6 May 2019 17:08:45 +0200
+Subject: [PATCH 081/174] x86: dovetail: add core support
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+---
+ arch/x86/Kconfig                   |  3 +++
+ arch/x86/include/asm/dovetail.h    |  9 +++++++++
+ arch/x86/include/asm/thread_info.h | 13 ++++++++++++-
+ arch/x86/kernel/asm-offsets.c      |  3 +++
+ arch/x86/kernel/tsc.c              |  2 ++
+ 5 files changed, 29 insertions(+), 1 deletion(-)
+ create mode 100644 arch/x86/include/asm/dovetail.h
+
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 3263510f1b38..5f986283d92a 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -31,6 +31,7 @@ config X86_64
+ 	select ARCH_USE_CMPXCHG_LOCKREF
+ 	select HAVE_ARCH_SOFT_DIRTY
+ 	select HAVE_IRQ_PIPELINE
++	select HAVE_DOVETAIL
+ 	select MODULES_USE_ELF_RELA
+ 	select NEED_DMA_MAP_STATE
+ 	select SWIOTLB
+@@ -252,6 +253,7 @@ config X86
+ 	select HAVE_NMI
+ 	select HAVE_NOINSTR_VALIDATION		if HAVE_OBJTOOL
+ 	select HAVE_OBJTOOL			if X86_64
++	select HAVE_PERCPU_PREEMPT_COUNT
+ 	select HAVE_OPTPROBES
+ 	select HAVE_PCSPKR_PLATFORM
+ 	select HAVE_PERF_EVENTS
+@@ -897,6 +899,7 @@ config INTEL_TDX_GUEST
+ 
+ endif # HYPERVISOR_GUEST
+ 
++source "kernel/Kconfig.dovetail"
+ source "arch/x86/Kconfig.cpu"
+ 
+ config HPET_TIMER
+diff --git a/arch/x86/include/asm/dovetail.h b/arch/x86/include/asm/dovetail.h
+new file mode 100644
+index 000000000000..ee9cc35e6c47
+--- /dev/null
++++ b/arch/x86/include/asm/dovetail.h
+@@ -0,0 +1,9 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (C) 2019 Philippe Gerum.
++ */
++#ifndef _ASM_X86_DOVETAIL_H
++#define _ASM_X86_DOVETAIL_H
++
++#endif /* _ASM_X86_DOVETAIL_H */
+diff --git a/arch/x86/include/asm/thread_info.h b/arch/x86/include/asm/thread_info.h
+index fba62191b3e9..51d7f2d515a5 100644
+--- a/arch/x86/include/asm/thread_info.h
++++ b/arch/x86/include/asm/thread_info.h
+@@ -52,6 +52,7 @@
+ struct task_struct;
+ #include <asm/cpufeature.h>
+ #include <linux/atomic.h>
++#include <dovetail/thread_info.h>
+ 
+ struct thread_info {
+ 	unsigned long		flags;		/* low level flags */
+@@ -60,6 +61,7 @@ struct thread_info {
+ #ifdef CONFIG_SMP
+ 	u32			cpu;		/* current CPU */
+ #endif
++	struct oob_thread_state	oob_state;	/* co-kernel thread state */
+ };
+ 
+ #define INIT_THREAD_INFO(tsk)			\
+@@ -67,6 +69,8 @@ struct thread_info {
+ 	.flags		= 0,			\
+ }
+ 
++#define ti_local_flags(__ti)	((__ti)->status)
++
+ #else /* !__ASSEMBLY__ */
+ 
+ #include <asm/asm-offsets.h>
+@@ -98,6 +102,7 @@ struct thread_info {
+ #define TIF_SPEC_FORCE_UPDATE	23	/* Force speculation MSR update in context switch */
+ #define TIF_FORCED_TF		24	/* true if TF in eflags artificially */
+ #define TIF_BLOCKSTEP		25	/* set when we want DEBUGCTLMSR_BTF */
++#define TIF_MAYDAY		26	/* emergency trap pending */
+ #define TIF_LAZY_MMU_UPDATES	27	/* task is updating the mmu lazily */
+ #define TIF_ADDR32		29	/* 32-bit address space on 64 bits */
+ 
+@@ -119,6 +124,7 @@ struct thread_info {
+ #define _TIF_IO_BITMAP		(1 << TIF_IO_BITMAP)
+ #define _TIF_SPEC_FORCE_UPDATE	(1 << TIF_SPEC_FORCE_UPDATE)
+ #define _TIF_FORCED_TF		(1 << TIF_FORCED_TF)
++#define _TIF_MAYDAY		(1 << TIF_MAYDAY)
+ #define _TIF_BLOCKSTEP		(1 << TIF_BLOCKSTEP)
+ #define _TIF_LAZY_MMU_UPDATES	(1 << TIF_LAZY_MMU_UPDATES)
+ #define _TIF_ADDR32		(1 << TIF_ADDR32)
+@@ -215,9 +221,14 @@ static inline int arch_within_stack_frames(const void * const stack,
+  * have to worry about atomic accesses.
+  */
+ #define TS_COMPAT		0x0002	/* 32bit syscall active (64BIT)*/
+-#define TS_OOB			0x0004	/* Thread is running out-of-band */
++/* bits 2 and 3 reserved for compat */
++#define TS_OOB			0x0010	/* Thread is running out-of-band */
++#define TS_DOVETAIL		0x0020  /* Dovetail notifier enabled */
++#define TS_OFFSTAGE		0x0040	/* Thread is in-flight to OOB context */
+ 
+ #define _TLF_OOB		TS_OOB
++#define _TLF_DOVETAIL		TS_DOVETAIL
++#define _TLF_OFFSTAGE		TS_OFFSTAGE
+ 
+ #ifndef __ASSEMBLY__
+ #ifdef CONFIG_COMPAT
+diff --git a/arch/x86/kernel/asm-offsets.c b/arch/x86/kernel/asm-offsets.c
+index 50383bc46dd7..484c919eea7a 100644
+--- a/arch/x86/kernel/asm-offsets.c
++++ b/arch/x86/kernel/asm-offsets.c
+@@ -38,6 +38,9 @@ static void __used common(void)
+ #ifdef CONFIG_STACKPROTECTOR
+ 	OFFSET(TASK_stack_canary, task_struct, stack_canary);
+ #endif
++#ifdef CONFIG_IRQ_PIPELINE
++	DEFINE(OOB_stage_mask, STAGE_MASK);
++#endif
+ 
+ 	BLANK();
+ 	OFFSET(pbe_address, pbe, address);
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index 038cecdb28c6..978e51de6478 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -1480,6 +1480,8 @@ static int __init init_tsc_clocksource(void)
+ 	if (boot_cpu_has(X86_FEATURE_NONSTOP_TSC_S3))
+ 		clocksource_tsc.flags |= CLOCK_SOURCE_SUSPEND_NONSTOP;
+ 
++	clocksource_tsc.vdso_type = CLOCKSOURCE_VDSO_ARCHITECTED;
++
+ 	/*
+ 	 * When TSC frequency is known (retrieved via MSR or CPUID), we skip
+ 	 * the refined calibration and directly register it as a clocksource.
+-- 
+2.43.0
+

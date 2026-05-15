@@ -1,0 +1,48 @@
+From cddb24c46bd78eb88a37d188438d7f55ad14dd16 Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Mon, 26 Feb 2024 23:53:41 +0100
+Subject: [PATCH 118/174] dovetail: x86: Fix detection of prctl based compat
+ syscalls
+
+In case a compat application is requesting a dovetail service the
+syscall number will not be equal to __NR_prctl (= the x86_64 syscall
+number).
+
+The same problem exists on the arm64 architecture where the problem was
+already addressed. Apply the same to x86.
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/x86/include/asm/dovetail.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/x86/include/asm/dovetail.h b/arch/x86/include/asm/dovetail.h
+index 2a85995d6564..001520262ce6 100644
+--- a/arch/x86/include/asm/dovetail.h
++++ b/arch/x86/include/asm/dovetail.h
+@@ -10,6 +10,7 @@
+ 
+ #include <asm/io_bitmap.h>
+ #include <asm/fpu/api.h>
++#include <linux/compat.h>
+ 
+ static inline void arch_dovetail_exec_prepare(void)
+ {
+@@ -40,6 +41,14 @@ void arch_dovetail_switch_finish(bool enter_inband)
+ 	}
+ }
+ 
++/*
++ * 172 is __NR_prctl from unistd in compat mode, without #inclusion
++ * hell. At the end of the day, this number is written in stone to
++ * honor the ABI stability promise anyway.
++ */
++#define arch_dovetail_is_syscall(__nr)	\
++	(in_compat_syscall() ? (__nr) == 172 : (__nr) == __NR_prctl)
++
+ #endif
+ 
+ #endif /* _ASM_X86_DOVETAIL_H */
+-- 
+2.43.0
+

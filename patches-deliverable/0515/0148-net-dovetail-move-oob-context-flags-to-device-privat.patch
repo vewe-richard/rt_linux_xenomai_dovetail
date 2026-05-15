@@ -1,0 +1,95 @@
+From 9000a67b7764974980d7ea082cb311e9dcc4fa1e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Fri, 1 Mar 2024 11:12:58 +0100
+Subject: [PATCH 148/174] net: dovetail: move oob context flags to device
+ private flags
+
+Out-of-band capability is a generic information which should be
+advertised by the device directly.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/linux/netdevice.h | 14 ++++++++++----
+ include/net/netoob.h      |  6 ------
+ 2 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index b5fbfc9ba63e..239ab4d9db21 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -1719,6 +1719,8 @@ struct net_device_ops {
+  * @IFF_SEE_ALL_HWTSTAMP_REQUESTS: device wants to see calls to
+  *	ndo_hwtstamp_set() for all timestamp requests regardless of source,
+  *	even if those aren't HWTSTAMP_SOURCE_NETDEV.
++ * @IFF_OOB_CAPABLE: device supports direct out-of-band I/O operations.
++ * @IFF_OOB_PORT: device is an active out-of-band port.
+  */
+ enum netdev_priv_flags {
+ 	IFF_802_1Q_VLAN			= 1<<0,
+@@ -1755,6 +1757,8 @@ enum netdev_priv_flags {
+ 	IFF_TX_SKB_NO_LINEAR		= BIT_ULL(31),
+ 	IFF_CHANGE_PROTO_DOWN		= BIT_ULL(32),
+ 	IFF_SEE_ALL_HWTSTAMP_REQUESTS	= BIT_ULL(33),
++	IFF_OOB_CAPABLE			= BIT_ULL(34),
++	IFF_OOB_PORT			= BIT_ULL(35),
+ };
+ 
+ #define IFF_802_1Q_VLAN			IFF_802_1Q_VLAN
+@@ -1788,6 +1792,8 @@ enum netdev_priv_flags {
+ #define IFF_FAILOVER_SLAVE		IFF_FAILOVER_SLAVE
+ #define IFF_L3MDEV_RX_HANDLER		IFF_L3MDEV_RX_HANDLER
+ #define IFF_TX_SKB_NO_LINEAR		IFF_TX_SKB_NO_LINEAR
++#define IFF_OOB_CAPABLE			IFF_OOB_CAPABLE
++#define IFF_OOB_PORT			IFF_OOB_PORT
+ 
+ /* Specifies the type of the struct net_device::ml_priv pointer */
+ enum netdev_ml_priv_type {
+@@ -4383,22 +4389,22 @@ int netif_xmit_oob(struct sk_buff *skb);
+ 
+ static inline bool netdev_is_oob_capable(struct net_device *dev)
+ {
+-	return !!(dev->oob_context.flags & IFF_OOB_CAPABLE);
++	return !!(dev->priv_flags & IFF_OOB_CAPABLE);
+ }
+ 
+ static inline void netdev_enable_oob_port(struct net_device *dev)
+ {
+-	dev->oob_context.flags |= IFF_OOB_PORT;
++	dev->priv_flags |= IFF_OOB_PORT;
+ }
+ 
+ static inline void netdev_disable_oob_port(struct net_device *dev)
+ {
+-	dev->oob_context.flags &= ~IFF_OOB_PORT;
++	dev->priv_flags &= ~IFF_OOB_PORT;
+ }
+ 
+ static inline bool netdev_is_oob_port(struct net_device *dev)
+ {
+-	return !!(dev->oob_context.flags & IFF_OOB_PORT);
++	return !!(dev->priv_flags & IFF_OOB_PORT);
+ }
+ 
+ static inline struct sk_buff *netdev_alloc_oob_skb(struct net_device *dev,
+diff --git a/include/net/netoob.h b/include/net/netoob.h
+index 55fd2357afb2..02ec893d7d7c 100644
+--- a/include/net/netoob.h
++++ b/include/net/netoob.h
+@@ -5,14 +5,8 @@
+ #include <dovetail/net.h>
+ #include <dovetail/netdevice.h>
+ 
+-/* Device supports direct out-of-band operations (RX & TX) */
+-#define IFF_OOB_CAPABLE		BIT(0)
+-/* Device is an out-of-band port */
+-#define IFF_OOB_PORT		BIT(1)
+-
+ /* Netdevice context extension for oob handling. */
+ struct oob_netdev_context {
+-	int flags;
+ 	struct oob_netdev_state dev_state;
+ };
+ 
+-- 
+2.43.0
+

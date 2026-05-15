@@ -1,0 +1,49 @@
+From b0a1891c6a011e9cd2eb352a829788f522b5eaaf Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Tue, 12 Mar 2024 14:12:49 +0100
+Subject: [PATCH 137/174] genirq: irq_pipeline: skip IRQ forwarding when
+ running oob
+
+A subsequent oob event might arrive before its handler had a chance to
+process a pending forwarded interrupt from the in-band stage.
+
+Since we don't want to delay interrupts when oob handlers exist, we
+cannot mask them and/or defer EOI until the in-band stage did process
+them. To address the issue, let's ignore forwarding if the oob stage
+is current in forward_irq_event().
+
+As a result, the semantics of IRQ forwarding requires the oob-side of
+the interrupt handler to decode and record all forwarded events as
+many times as it might be called in a row, until the in-band side is
+able to process all of them in one go eventually.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ kernel/irq/chip.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index 5066b2c938c6..2fe9aa5f8400 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -532,11 +532,13 @@ void irq_clear_forward(struct irq_desc *desc)
+ 
+ static irqreturn_t forward_irq_event(struct irq_desc *desc)
+ {
+-	irqreturn_t ret;
++	irqreturn_t ret = IRQ_HANDLED;
+ 
+-	raw_spin_unlock(&desc->lock);
+-	ret = handle_irq_event_percpu(desc);
+-	raw_spin_lock(&desc->lock);
++	if (likely(running_inband())) {
++		raw_spin_unlock(&desc->lock);
++		ret = handle_irq_event_percpu(desc);
++		raw_spin_lock(&desc->lock);
++	}
+ 
+ 	return ret;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,57 @@
+From 3d564c5f94e70021470d8425e9672d1383ecc02e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 16 Nov 2023 17:08:10 +0100
+Subject: [PATCH 142/174] net: dovetail: pass net struct to oob_state
+ init/cleanup hooks
+
+The companion core may want to refer to any field within the net
+namespace to initialize/cleanup for oob support.  Change the signature
+of the net_{init, cleanup}_oob_state() hooks accordingly.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/dovetail/net.h   | 6 ++++--
+ net/core/net_namespace.c | 4 ++--
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/include/dovetail/net.h b/include/dovetail/net.h
+index 163fbccd862d..c7ef00fb9a5f 100644
+--- a/include/dovetail/net.h
++++ b/include/dovetail/net.h
+@@ -9,7 +9,9 @@
+ struct oob_net_state {
+ };
+ 
+-static inline void net_init_oob_state(struct oob_net_state *nets) { }
+-static inline void net_cleanup_oob_state(struct oob_net_state *nets) { }
++struct net;
++
++static inline void net_init_oob_state(struct net *net) { }
++static inline void net_cleanup_oob_state(struct net *net) { }
+ 
+ #endif /* !_DOVETAIL_NET_H */
+diff --git a/net/core/net_namespace.c b/net/core/net_namespace.c
+index 0a2071a15f98..90a2c09fe1e2 100644
+--- a/net/core/net_namespace.c
++++ b/net/core/net_namespace.c
+@@ -339,7 +339,7 @@ static __net_init int setup_net(struct net *net, struct user_namespace *user_ns)
+ 	spin_lock_init(&net->nsid_lock);
+ 	mutex_init(&net->ipv4.ra_mutex);
+ 	/* Dovetail: set up the oob-specific state. */
+-	net_init_oob_state(&net->oob);
++	net_init_oob_state(net);
+ 
+ 	list_for_each_entry(ops, &pernet_list, list) {
+ 		error = ops_init(ops, net);
+@@ -628,7 +628,7 @@ static void cleanup_net(struct work_struct *work)
+ 		unhash_nsid(net, last);
+ 		list_add_tail(&net->exit_list, &net_exit_list);
+ 		/* Dovetail: drop the oob-specific state. */
+-		net_cleanup_oob_state(&net->oob);
++		net_cleanup_oob_state(net);
+ 	}
+ 
+ 	/* Run all of the network namespace pre_exit methods */
+-- 
+2.43.0
+

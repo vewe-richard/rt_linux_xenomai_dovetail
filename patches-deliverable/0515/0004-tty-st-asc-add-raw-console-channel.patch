@@ -1,0 +1,57 @@
+From 96b3acb798fdb93fa89487c8500735796ee78965 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 23 Jul 2018 18:28:48 +0200
+Subject: [PATCH 004/174] tty: st-asc: add raw console channel
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/tty/serial/st-asc.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/tty/serial/st-asc.c b/drivers/tty/serial/st-asc.c
+index 92b9f6894006..11cacd68905e 100644
+--- a/drivers/tty/serial/st-asc.c
++++ b/drivers/tty/serial/st-asc.c
+@@ -872,6 +872,29 @@ static void asc_console_write(struct console *co, const char *s, unsigned count)
+ 		spin_unlock_irqrestore(&port->lock, flags);
+ }
+ 
++#ifdef CONFIG_RAW_PRINTK
++
++static void asc_console_write_raw(struct console *co,
++				  const char *s, unsigned int count)
++{
++	struct uart_port *port = &asc_ports[co->index].port;
++	unsigned long timeout = 1000000;
++	u32 intenable;
++
++	intenable = asc_in(port, ASC_INTEN);
++	asc_out(port, ASC_INTEN, 0);
++	(void)asc_in(port, ASC_INTEN);	/* Defeat bus write posting */
++
++	uart_console_write(port, s, count, asc_console_putchar);
++
++	while (timeout-- && !asc_txfifo_is_empty(port))
++		cpu_relax();	/* wait shorter */
++
++	asc_out(port, ASC_INTEN, intenable);
++}
++
++#endif
++
+ static int asc_console_setup(struct console *co, char *options)
+ {
+ 	struct asc_port *ascport;
+@@ -904,6 +927,9 @@ static struct console asc_console = {
+ 	.name		= ASC_SERIAL_NAME,
+ 	.device		= uart_console_device,
+ 	.write		= asc_console_write,
++#ifdef CONFIG_RAW_PRINTK
++	.write_raw	= asc_console_write_raw,
++#endif
+ 	.setup		= asc_console_setup,
+ 	.flags		= CON_PRINTBUFFER,
+ 	.index		= -1,
+-- 
+2.43.0
+

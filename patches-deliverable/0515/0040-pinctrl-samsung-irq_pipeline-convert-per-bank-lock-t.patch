@@ -1,0 +1,31 @@
+From 1e50a61a105c9ec6e562864df34fa20d8a517f2b Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 10 Oct 2020 11:39:01 +0200
+Subject: [PATCH 040/174] pinctrl: samsung: irq_pipeline: convert per-bank lock
+ to hard form
+
+In preparation to enabling pipelined interrupt control, convert the
+per-bank lock to a hard spinlock. This is required to run the locking
+code from the pipeline entry context and the out-of-band stage.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/pinctrl/samsung/pinctrl-samsung.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/pinctrl/samsung/pinctrl-samsung.h b/drivers/pinctrl/samsung/pinctrl-samsung.h
+index 1efbae6c9987..d7fd42bbe6d6 100644
+--- a/drivers/pinctrl/samsung/pinctrl-samsung.h
++++ b/drivers/pinctrl/samsung/pinctrl-samsung.h
+@@ -179,7 +179,7 @@ struct samsung_pin_bank {
+ 	struct gpio_chip gpio_chip;
+ 	struct pinctrl_gpio_range grange;
+ 	struct exynos_irq_chip *irq_chip;
+-	raw_spinlock_t slock;
++	hard_spinlock_t slock;
+ 
+ 	u32 pm_save[PINCFG_TYPE_NUM + 1]; /* +1 to handle double CON registers*/
+ };
+-- 
+2.43.0
+

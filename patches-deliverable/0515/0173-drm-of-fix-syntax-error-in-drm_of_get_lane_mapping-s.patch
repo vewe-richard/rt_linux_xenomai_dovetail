@@ -1,0 +1,27 @@
+From 08cea05b41c86eb374b8910889191a326b717a30 Mon Sep 17 00:00:00 2001
+From: vewe-richard <jiang.j.qian@qq.com>
+Date: Fri, 15 May 2026 17:06:41 +0800
+Subject: [PATCH 173/174] drm: of: fix syntax error in drm_of_get_lane_mapping
+ stub
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ include/drm/drm_of.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/drm/drm_of.h b/include/drm/drm_of.h
+index ad02ac3442bc..ddc40061fd2e 100644
+--- a/include/drm/drm_of.h
++++ b/include/drm/drm_of.h
+@@ -142,7 +142,7 @@ drm_of_get_lane_mapping(const struct device_node *port,
+ 			       int port_reg, int reg,
+ 			       const unsigned int min,
+ 			       const unsigned int max,
+-			       unsigned int *lanes);
++			       unsigned int *lanes)
+ {
+ 	return -EINVAL;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,143 @@
+From a89ef6f1bba6a78f124ffe962b6b3fb88db2cac4 Mon Sep 17 00:00:00 2001
+From: vewe-richard <jiang.j.qian@qq.com>
+Date: Fri, 15 May 2026 16:58:10 +0800
+Subject: [PATCH 172/174] x86: dovetail: fix build errors for x86_64
+ CONFIG_IRQ_PIPELINE=y
+
+- irqflags.h: add missing native_* IRQ functions and include irq_pipeline.h
+- vector.c: replace direct timer access with queue_cleanup_work() macro
+- pci.h: make of_pci_*_wake_irq stubs inline to suppress unused warnings
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/x86/include/asm/irqflags.h | 59 ++++++++++++++++++++++++---------
+ arch/x86/kernel/apic/vector.c   | 20 +----------
+ drivers/pci/pci.h               |  4 +--
+ 3 files changed, 47 insertions(+), 36 deletions(-)
+
+diff --git a/arch/x86/include/asm/irqflags.h b/arch/x86/include/asm/irqflags.h
+index 57974bc06683..9639a3945052 100644
+--- a/arch/x86/include/asm/irqflags.h
++++ b/arch/x86/include/asm/irqflags.h
+@@ -57,6 +57,49 @@ static __always_inline void native_safe_halt(void)
+ 	asm volatile("sti; hlt": : :"memory");
+ }
+ 
++static inline unsigned long native_save_flags(void)
++{
++	return native_save_fl();
++}
++
++static __always_inline void native_irq_sync(void)
++{
++	asm volatile("sti ; nop ; cli": : :"memory");
++}
++
++static __always_inline unsigned long native_irq_save(void)
++{
++	unsigned long flags;
++
++	flags = native_save_flags();
++
++	native_irq_disable();
++
++	return flags;
++}
++
++static __always_inline int native_irqs_disabled_flags(unsigned long flags)
++{
++	return !(flags & X86_EFLAGS_IF);
++}
++
++static __always_inline void native_irq_restore(unsigned long flags)
++{
++	/*
++	 * CAUTION: the hard_irq_* API may be used to bracket code
++	 * which re-enables interrupts inside save/restore pairs, so
++	 * do not try to be (too) smart: do restore the original flags
++	 * unconditionally.
++	 */
++	native_restore_fl(flags);
++}
++
++static __always_inline bool native_irqs_disabled(void)
++{
++	unsigned long flags = native_save_flags();
++	return native_irqs_disabled_flags(flags);
++}
++
+ static __always_inline void native_halt(void)
+ {
+ 	x86_idle_clear_cpu_buffers();
+@@ -92,21 +135,7 @@ static __always_inline void halt(void)
+ #else
+ #ifndef __ASSEMBLY__
+ #include <linux/types.h>
+-
+-static __always_inline unsigned long arch_local_save_flags(void)
+-{
+-	return native_save_fl();
+-}
+-
+-static __always_inline void arch_local_irq_disable(void)
+-{
+-	native_irq_disable();
+-}
+-
+-static __always_inline void arch_local_irq_enable(void)
+-{
+-	native_irq_enable();
+-}
++#include <asm/irq_pipeline.h>
+ 
+ #else
+ 
+diff --git a/arch/x86/kernel/apic/vector.c b/arch/x86/kernel/apic/vector.c
+index abf3a8ed117e..73e639eebb8c 100644
+--- a/arch/x86/kernel/apic/vector.c
++++ b/arch/x86/kernel/apic/vector.c
+@@ -1141,25 +1141,7 @@ static void __vector_schedule_cleanup(struct apic_chip_data *apicd)
+ 		struct vector_cleanup *cl = per_cpu_ptr(&vector_cleanup, cpu);
+ 
+ 		hlist_add_head(&apicd->clist, &cl->head);
+-
+-		/*
+-		 * The lockless timer_pending() check is safe here. If it
+-		 * returns true, then the callback will observe this new
+-		 * apic data in the hlist as everything is serialized by
+-		 * vector lock.
+-		 *
+-		 * If it returns false then the timer is either not armed
+-		 * or the other CPU executes the callback, which again
+-		 * would be blocked on vector lock. Rearming it in the
+-		 * latter case makes it fire for nothing.
+-		 *
+-		 * This is also safe against the callback rearming the timer
+-		 * because that's serialized via vector lock too.
+-		 */
+-		if (!timer_pending(&cl->timer)) {
+-			cl->timer.expires = jiffies + 1;
+-			add_timer_on(&cl->timer, cpu);
+-		}
++		queue_cleanup_work(cl, cpu);
+ 	} else {
+ 		pr_warn("IRQ %u schedule cleanup for offline CPU %u\n", apicd->irq, cpu);
+ 		free_moved_vector(apicd);
+diff --git a/drivers/pci/pci.h b/drivers/pci/pci.h
+index ed5aab563025..b39c4291cd14 100644
+--- a/drivers/pci/pci.h
++++ b/drivers/pci/pci.h
+@@ -703,8 +703,8 @@ static inline int devm_of_pci_bridge_init(struct device *dev, struct pci_host_br
+ 	return 0;
+ }
+ 
+-static int of_pci_setup_wake_irq(struct pci_dev *pdev) { return 0; }
+-static void of_pci_teardown_wake_irq(struct pci_dev *pdev) { }
++static inline int of_pci_setup_wake_irq(struct pci_dev *pdev) { return 0; }
++static inline void of_pci_teardown_wake_irq(struct pci_dev *pdev) { }
+ 
+ static inline int of_pci_get_equalization_presets(struct device *dev,
+ 						  struct pci_eq_presets *presets,
+-- 
+2.43.0
+

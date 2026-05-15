@@ -1,0 +1,254 @@
+From 48c12cbcfcbb193782b3b0e3e86496410e07e19d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 16 Jun 2020 11:04:16 +0200
+Subject: [PATCH 022/174] rcu: irq_pipeline: handle non-maskable pipeline entry
+ context
+
+From the standpoint of the in-band context, an interrupt entry is
+logically similar to a NMI when pipelining is enabled, since it may
+preempt the in-band stage almost anywhere as IRQs are only virtually
+masked most of the time there, including inside (virtually)
+interrupt-free sections.
+
+Enable the RCU code to detect a pipeline entry, handling it like a
+NMI, so that we may take the RCU read lock there as well.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+
+rcu: irq_pipeline: enable read lock sections from out-of-band context
+
+Allow an out-of-band caller to start a RCU read locked section by
+forcing a RCU entry from NMI. Conversely, leaving such section unwinds
+the NMI entry. Like RCU read lock sections, NMI entries can be nested.
+
+In the same move, stop assuming that any out-of-band context means
+that RCU is not watching anymore, as a matter of fact the previous
+change would contradict this.
+
+The logic is based on the invariant that the pipeline stage cannot
+change while in a RCU read locked section.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/hardirq.h   |  5 +++++
+ include/linux/rcupdate.h  | 14 +++++++++++++-
+ kernel/context_tracking.c |  6 +++---
+ kernel/rcu/tree.c         |  7 +++++--
+ kernel/rcu/tree_plugin.h  |  7 ++++---
+ kernel/rcu/update.c       | 31 +++++++++++++++++++++++++++++++
+ 6 files changed, 61 insertions(+), 9 deletions(-)
+
+diff --git a/include/linux/hardirq.h b/include/linux/hardirq.h
+index 0eb614008331..cf633c758b1e 100644
+--- a/include/linux/hardirq.h
++++ b/include/linux/hardirq.h
+@@ -158,4 +158,9 @@ static inline bool in_hard_irq(void)
+ 	return irqs_pipelined() ? in_pipeline() : in_hardirq();
+ }
+ 
++static inline bool in_nonmaskable(void)
++{
++	return on_pipeline_entry() || in_nmi();
++}
++
+ #endif /* LINUX_HARDIRQ_H */
+diff --git a/include/linux/rcupdate.h b/include/linux/rcupdate.h
+index 27531a0b3a6e..9b7ed2918683 100644
+--- a/include/linux/rcupdate.h
++++ b/include/linux/rcupdate.h
+@@ -157,6 +157,14 @@ static inline int rcu_nocb_cpu_deoffload(int cpu) { return 0; }
+ static inline void rcu_nocb_flush_deferred_wakeup(void) { }
+ #endif /* #else #ifdef CONFIG_RCU_NOCB_CPU */
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++void rcu_oob_prepare_lock(void);
++void rcu_oob_finish_lock(void);
++#else
++#define rcu_oob_prepare_lock()	 do { } while (0)
++#define rcu_oob_finish_lock()	 do { } while (0)
++#endif
++
+ /*
+  * Note a quasi-voluntary context switch for RCU-tasks's benefit.
+  * This is a macro rather than an inline function to avoid #include hell.
+@@ -368,7 +376,7 @@ static inline int rcu_read_lock_bh_held(void)
+ 
+ static inline int rcu_read_lock_sched_held(void)
+ {
+-	return !preemptible();
++	return !running_inband() || !preemptible();
+ }
+ 
+ static inline int rcu_read_lock_any_held(void)
+@@ -781,6 +789,7 @@ do {									      \
+  */
+ static __always_inline void rcu_read_lock(void)
+ {
++	rcu_oob_prepare_lock();
+ 	__rcu_read_lock();
+ 	__acquire(RCU);
+ 	rcu_lock_acquire(&rcu_lock_map);
+@@ -816,6 +825,7 @@ static inline void rcu_read_unlock(void)
+ 			 "rcu_read_unlock() used illegally while idle");
+ 	__release(RCU);
+ 	__rcu_read_unlock();
++	rcu_oob_finish_lock();
+ 	rcu_lock_release(&rcu_lock_map); /* Keep acq info for rls diags. */
+ }
+ 
+@@ -874,6 +884,7 @@ static inline void rcu_read_unlock_bh(void)
+ static inline void rcu_read_lock_sched(void)
+ {
+ 	preempt_disable();
++	rcu_oob_prepare_lock();
+ 	__acquire(RCU_SCHED);
+ 	rcu_lock_acquire(&rcu_sched_lock_map);
+ 	RCU_LOCKDEP_WARN(!rcu_is_watching(),
+@@ -898,6 +909,7 @@ static inline void rcu_read_unlock_sched(void)
+ 			 "rcu_read_unlock_sched() used illegally while idle");
+ 	rcu_lock_release(&rcu_sched_lock_map);
+ 	__release(RCU_SCHED);
++	rcu_oob_finish_lock();
+ 	preempt_enable();
+ }
+ 
+diff --git a/kernel/context_tracking.c b/kernel/context_tracking.c
+index 6ef0b35fc28c..b374629865fb 100644
+--- a/kernel/context_tracking.c
++++ b/kernel/context_tracking.c
+@@ -239,7 +239,7 @@ void noinstr ct_nmi_exit(void)
+ 	ct_kernel_exit_state(RCU_DYNTICKS_IDX);
+ 	// ... but is no longer watching here.
+ 
+-	if (!in_nmi())
++	if (!in_nonmaskable())
+ 		rcu_dynticks_task_enter();
+ }
+ 
+@@ -273,7 +273,7 @@ void noinstr ct_nmi_enter(void)
+ 	 */
+ 	if (rcu_dynticks_curr_cpu_in_eqs()) {
+ 
+-		if (!in_nmi())
++		if (!in_nonmaskable())
+ 			rcu_dynticks_task_exit();
+ 
+ 		// RCU is not watching here ...
+@@ -287,7 +287,7 @@ void noinstr ct_nmi_enter(void)
+ 		instrument_atomic_write(&ct->state, sizeof(ct->state));
+ 
+ 		incby = 1;
+-	} else if (!in_nmi()) {
++	} else if (!in_nonmaskable()) {
+ 		instrumentation_begin();
+ 		rcu_irq_enter_check_tick();
+ 	} else  {
+diff --git a/kernel/rcu/tree.c b/kernel/rcu/tree.c
+index 607b2e68fa4c..79cc61eac408 100644
+--- a/kernel/rcu/tree.c
++++ b/kernel/rcu/tree.c
+@@ -612,7 +612,7 @@ void __rcu_irq_enter_check_tick(void)
+ 	struct rcu_data *rdp = this_cpu_ptr(&rcu_data);
+ 
+ 	// If we're here from NMI there's nothing to do.
+-	if (in_nmi())
++	if (in_nonmaskable())
+ 		return;
+ 
+ 	RCU_LOCKDEP_WARN(rcu_dynticks_curr_cpu_in_eqs(),
+@@ -696,6 +696,9 @@ notrace bool rcu_is_watching(void)
+ {
+ 	bool ret;
+ 
++	if (on_pipeline_entry())
++ 		return true;
++ 
+ 	preempt_disable_notrace();
+ 	ret = !rcu_dynticks_curr_cpu_in_eqs();
+ 	preempt_enable_notrace();
+@@ -4219,7 +4222,7 @@ bool rcu_lockdep_current_cpu_online(void)
+ 	struct rcu_data *rdp;
+ 	bool ret = false;
+ 
+-	if (in_nmi() || !rcu_scheduler_fully_active)
++	if (in_nonmaskable() || !rcu_scheduler_fully_active)
+ 		return true;
+ 	preempt_disable_notrace();
+ 	rdp = this_cpu_ptr(&rcu_data);
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index 8707f155afb6..43e400e80e4f 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -652,8 +652,9 @@ static void rcu_read_unlock_special(struct task_struct *t)
+ 	bool preempt_bh_were_disabled =
+ 			!!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK));
+ 
+-	/* NMI handlers cannot block and cannot safely manipulate state. */
+-	if (in_nmi())
++	/* Neither NMI handlers nor pipeline entry code can either
++	   block or safely manipulate state. */
++	if (in_nonmaskable())
+ 		return;
+ 
+ 	local_irq_save(flags);
+@@ -841,7 +842,7 @@ void rcu_read_unlock_strict(void)
+ {
+ 	struct rcu_data *rdp;
+ 
+-	if (irqs_disabled() || in_atomic_preempt_off() || !rcu_state.gp_kthread)
++	if (on_pipeline_entry() || running_oob() || irqs_disabled() || in_atomic_preempt_off() || !rcu_state.gp_kthread)
+ 		return;
+ 
+ 	/*
+diff --git a/kernel/rcu/update.c b/kernel/rcu/update.c
+index 19bf6fa3ee6a..449758e9b1ce 100644
+--- a/kernel/rcu/update.c
++++ b/kernel/rcu/update.c
+@@ -101,6 +101,11 @@ module_param(rcu_normal_after_boot, int, 0444);
+  */
+ static bool rcu_read_lock_held_common(bool *ret)
+ {
++	if (irqs_pipelined() &&
++		(hard_irqs_disabled() || running_oob())) {
++		*ret = true;
++		return true;
++	}
+ 	if (!debug_lockdep_rcu_enabled()) {
+ 		*ret = true;
+ 		return true;
+@@ -249,6 +254,32 @@ EXPORT_SYMBOL_GPL(rcu_inkernel_boot_has_ended);
+ 
+ #endif /* #ifndef CONFIG_TINY_RCU */
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++
++/*
++ * Prepare for taking the RCU read lock when running out-of-band. Nop
++ * otherwise.
++ */
++void rcu_oob_prepare_lock(void)
++{
++	if (!on_pipeline_entry() && running_oob())
++		ct_nmi_enter();
++}
++EXPORT_SYMBOL_GPL(rcu_oob_prepare_lock);
++
++/*
++ * Converse to rcu_oob_prepare_lock(), after dropping the RCU read
++ * lock.
++ */
++void rcu_oob_finish_lock(void)
++{
++	if (!on_pipeline_entry() && running_oob())
++		ct_nmi_exit();
++}
++EXPORT_SYMBOL_GPL(rcu_oob_finish_lock);
++
++#endif	/* CONFIG_IRQ_PIPELINE */
++
+ /*
+  * Test each non-SRCU synchronous grace-period wait API.  This is
+  * useful just after a change in mode for these primitives, and
+-- 
+2.43.0
+

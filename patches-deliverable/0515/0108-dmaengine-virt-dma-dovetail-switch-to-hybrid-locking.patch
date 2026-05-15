@@ -1,0 +1,45 @@
+From edd318e028555794f5c024016ae0ff839483d78a Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 19 Oct 2023 09:05:58 +0200
+Subject: [PATCH 108/174] dmaengine: virt-dma: dovetail: switch to hybrid
+ locking
+
+Virtual channel code may be called from either the in-band or oob
+stage for an oob-driven channel, as a result of IRQ forwarding.
+
+Switch to an hybrid Dovetail lock to enforce the in-band semantics
+across the locked sections when applicable.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ drivers/dma/virt-dma.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/dma/virt-dma.h b/drivers/dma/virt-dma.h
+index 5e01bc89ffab..698bce541674 100644
+--- a/drivers/dma/virt-dma.h
++++ b/drivers/dma/virt-dma.h
+@@ -30,7 +30,7 @@ struct virt_dma_chan {
+ 	struct virt_dma_lockops *lock_ops;
+ 	union {
+ 		spinlock_t lock;
+-		hard_spinlock_t oob_lock;
++		hybrid_spinlock_t oob_lock;
+ 	};
+ #else
+ 	spinlock_t lock;
+@@ -201,6 +201,11 @@ static inline bool vchan_issue_pending(struct virt_dma_chan *vc)
+  * @vd: virtual descriptor to update
+  *
+  * vc.lock must be held by caller
++ *
++ * irq_pipeline: calling with hard irqs off is ok as long as we are
++ * running in-band from an interrupt context (i.e. in_interrupt()
++ * yields true), so that there is no attempt to wake up softirqd until
++ * the interrupt frame unwinds.
+  */
+ static inline void vchan_cookie_complete(struct virt_dma_desc *vd)
+ {
+-- 
+2.43.0
+

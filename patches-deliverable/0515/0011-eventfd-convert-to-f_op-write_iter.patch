@@ -1,0 +1,51 @@
+From 4afbabdc7b288fd9f0ff95907edf1458abfe4a69 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Wed, 11 Nov 2020 18:17:09 +0100
+Subject: [PATCH 011/174] eventfd: convert to f_op->write_iter()
+
+In the wake of the set_fs() removal, enable eventfd files to be
+written to by the kernel_write() interface, which restricts usage to
+fops implementing the write_iter() handler.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ fs/eventfd.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/fs/eventfd.c b/fs/eventfd.c
+index 33a918f9566c..41efead332c8 100644
+--- a/fs/eventfd.c
++++ b/fs/eventfd.c
+@@ -256,16 +256,16 @@ static ssize_t eventfd_read(struct kiocb *iocb, struct iov_iter *to)
+ 	return sizeof(ucnt);
+ }
+ 
+-static ssize_t eventfd_write(struct file *file, const char __user *buf, size_t count,
+-			     loff_t *ppos)
++static ssize_t eventfd_write(struct kiocb *iocb, struct iov_iter *from)
+ {
++	struct file *file = iocb->ki_filp;
+ 	struct eventfd_ctx *ctx = file->private_data;
+ 	ssize_t res;
+ 	__u64 ucnt;
+ 
+-	if (count < sizeof(ucnt))
++	if (iov_iter_count(from) < sizeof(ucnt))
+ 		return -EINVAL;
+-	if (copy_from_user(&ucnt, buf, sizeof(ucnt)))
++	if (copy_from_iter(&ucnt, sizeof(ucnt), from) != sizeof(ucnt))
+ 		return -EFAULT;
+ 	if (ucnt == ULLONG_MAX)
+ 		return -EINVAL;
+@@ -313,7 +313,7 @@ static const struct file_operations eventfd_fops = {
+ 	.release	= eventfd_release,
+ 	.poll		= eventfd_poll,
+ 	.read_iter	= eventfd_read,
+-	.write		= eventfd_write,
++	.write_iter	= eventfd_write,
+ 	.llseek		= noop_llseek,
+ };
+ 
+-- 
+2.43.0
+

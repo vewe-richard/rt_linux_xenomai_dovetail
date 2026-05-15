@@ -1,0 +1,46 @@
+From f9cfcf5eee562966137f5156fa828d80fe2ae8b0 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 2 Jan 2025 18:13:47 +0100
+Subject: [PATCH 168/174] dovetail: fs: rename oob_data to f_oob_ctx in struct
+ file
+
+The notion of "oob data" is used across several kernel subsystems,
+particularly in the networking area. Dovetail's notion of out-of-band
+relates to the execution context of a CPU on the high priority stage
+of the interrupt pipeline instead (i.e. the one which runs
+asynchronously to the regular scheduling of operations).
+
+Mitigate the confusion in struct file by moving from the way too
+generic "data" to "context", abiding by the common naming scheme there
+in the same move, i.e. s/oob_data/f_oob_ctx/.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/fs.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 9f3455ef6c7f..16bdfe1cbe38 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1022,7 +1022,6 @@ struct file {
+ #endif
+ 	/* needed for tty driver, and maybe others */
+ 	void			*private_data;
+-	void			*oob_data;
+ 
+ #ifdef CONFIG_EPOLL
+ 	/* Used by fs/eventpoll.c to link all the hooks to this file */
+@@ -1031,6 +1030,9 @@ struct file {
+ 	struct address_space	*f_mapping;
+ 	errseq_t		f_wb_err;
+ 	errseq_t		f_sb_err; /* for syncfs */
++#ifdef CONFIG_DOVETAIL
++	void			*f_oob_ctx;
++#endif
+ } __randomize_layout
+   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+ 
+-- 
+2.43.0
+

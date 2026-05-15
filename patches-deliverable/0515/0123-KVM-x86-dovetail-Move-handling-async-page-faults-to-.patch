@@ -1,0 +1,75 @@
+From d0b7e98fda9645820c81635dbd62e7b7659ef50f Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Tue, 25 Jun 2024 11:03:15 +0200
+Subject: [PATCH 123/174] KVM: x86: dovetail: Move handling async page faults
+ to the inband stage
+
+Dovetail was stuck in the boot phase as KVM guest on a system that
+reported the asynchronous page fault handling feature.
+
+The apic_eoi() call in sysvec_kvm_asyncpf_interrupt() has no effect in
+case CONFIG_IRQPIPELINE is enabled, thus those IRQs / vectors where
+never ACKed at APIC level, the CPUs stalled.
+
+Instead of migrating to __apic_oie() the IDT entry for
+HYPERVISOR_CALLBACK_VECTOR for KVM on x86 is now marked as PIPELINED.
+Other architectures (and other guest extensions) already used
+DECLARE_IDTENTRY_SYSVEC_PIPELINED().
+
+The imbalance of how HYPERVISOR_CALLBACK_VECTOR is being used /
+pipelined goes back to 5.10. Backporting might be required.
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/x86/include/asm/idtentry.h | 2 +-
+ arch/x86/kernel/irq_pipeline.c  | 6 ++++++
+ arch/x86/kernel/kvm.c           | 3 ++-
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index aba0619d14f6..ab66216a0741 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -814,7 +814,7 @@ DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_xen_hvm_callback);
+ #endif
+ 
+ #ifdef CONFIG_KVM_GUEST
+-DECLARE_IDTENTRY_SYSVEC(HYPERVISOR_CALLBACK_VECTOR,	sysvec_kvm_asyncpf_interrupt);
++DECLARE_IDTENTRY_SYSVEC_PIPELINED(HYPERVISOR_CALLBACK_VECTOR,	sysvec_kvm_asyncpf_interrupt);
+ #endif
+ 
+ #undef X86_TRAP_OTHER
+diff --git a/arch/x86/kernel/irq_pipeline.c b/arch/x86/kernel/irq_pipeline.c
+index 4dd308a473bf..a6beb0040036 100644
+--- a/arch/x86/kernel/irq_pipeline.c
++++ b/arch/x86/kernel/irq_pipeline.c
+@@ -155,6 +155,12 @@ static void do_sysvec_inband(struct irq_desc *desc, struct pt_regs *regs)
+ 		run_sysvec_on_irqstack_cond(__sysvec_acrn_hv_callback,
+ 					regs);
+ 		break;
++#endif
++#ifdef CONFIG_KVM_GUEST
++	case HYPERVISOR_CALLBACK_VECTOR:
++		run_sysvec_on_irqstack_cond(__sysvec_kvm_asyncpf_interrupt,
++					    regs);
++		break;
+ #endif
+ 	case LOCAL_TIMER_VECTOR:
+ 		run_sysvec_on_irqstack_cond(__sysvec_apic_timer_interrupt,
+diff --git a/arch/x86/kernel/kvm.c b/arch/x86/kernel/kvm.c
+index 9d9783b3c71c..74d5dc3fe741 100644
+--- a/arch/x86/kernel/kvm.c
++++ b/arch/x86/kernel/kvm.c
+@@ -291,7 +291,8 @@ noinstr bool __kvm_handle_async_pf(struct pt_regs *regs, u32 token)
+ 	return true;
+ }
+ 
+-DEFINE_IDTENTRY_SYSVEC(sysvec_kvm_asyncpf_interrupt)
++DEFINE_IDTENTRY_SYSVEC_PIPELINED(HYPERVISOR_CALLBACK_VECTOR,
++				 sysvec_kvm_asyncpf_interrupt)
+ {
+ 	struct pt_regs *old_regs = set_irq_regs(regs);
+ 	u32 token;
+-- 
+2.43.0
+

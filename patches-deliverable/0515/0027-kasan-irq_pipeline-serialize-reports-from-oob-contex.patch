@@ -1,0 +1,38 @@
+From f133996bc2c04ad7278f6267ad7e3b04b7d1f43a Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 20 Dec 2018 15:28:26 +0100
+Subject: [PATCH 027/174] kasan: irq_pipeline: serialize reports from oob
+ contexts
+
+KASAN may detect issues in code running out-of-band, so we have to
+serialize the report handler accordingly by turning the regular
+spinlock into a hard lock.
+
+This will trigger massive a latency spot when a report is emitted, but
+since kernel sanity is at stake when this happens, such spike is not
+the most urgent issue.
+
+This also means that the KASAN report lock becomes a raw lock -
+therefore cannot sleep with full preemption enabled.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ mm/kasan/report.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/kasan/report.c b/mm/kasan/report.c
+index 7301773b5208..a5aabb8396da 100644
+--- a/mm/kasan/report.c
++++ b/mm/kasan/report.c
+@@ -199,7 +199,7 @@ static inline void fail_non_kasan_kunit_test(void) { }
+ 
+ #endif /* CONFIG_KUNIT */
+ 
+-static DEFINE_RAW_SPINLOCK(report_lock);
++static DEFINE_HARD_SPINLOCK(report_lock);
+ 
+ static void start_report(unsigned long *flags, bool sync)
+ {
+-- 
+2.43.0
+

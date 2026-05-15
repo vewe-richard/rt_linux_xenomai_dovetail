@@ -1,0 +1,102 @@
+From 1cdfa564ccfb2db7a3ecdb1192b8139d3ea7384f Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 17 Sep 2023 11:36:26 +0200
+Subject: [PATCH 095/174] x86: irq_pipeline: export CALL_FUNCTION_OOB_VECTOR
+
+An interrupt vector to trigger function calls on remote CPUs via IPIs.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/include/asm/idtentry.h     |  3 ++-
+ arch/x86/include/asm/irq_pipeline.h |  1 +
+ arch/x86/include/asm/irq_vectors.h  |  3 ++-
+ arch/x86/kernel/idt.c               |  3 ++-
+ arch/x86/kernel/irq_pipeline.c      | 10 +++++++---
+ 5 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index d0e34ac0aded..7646910616cc 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -743,8 +743,9 @@ DECLARE_IDTENTRY_SYSVEC_PIPELINED(REBOOT_VECTOR,			sysvec_reboot);
+ DECLARE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_SINGLE_VECTOR,	sysvec_call_function_single);
+ DECLARE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_VECTOR,		sysvec_call_function);
+ #ifdef CONFIG_IRQ_PIPELINE
+-DECLARE_IDTENTRY_SYSVEC(RESCHEDULE_OOB_VECTOR,		sysvec_reschedule_oob_ipi);
+ DECLARE_IDTENTRY_SYSVEC(TIMER_OOB_VECTOR,		sysvec_timer_oob_ipi);
++DECLARE_IDTENTRY_SYSVEC(RESCHEDULE_OOB_VECTOR,		sysvec_reschedule_oob_ipi);
++DECLARE_IDTENTRY_SYSVEC(CALL_FUNCTION_OOB_VECTOR,       sysvec_call_function_oob_ipi);
+ #endif
+ #else
+ # define fred_sysvec_reschedule_ipi			NULL
+diff --git a/arch/x86/include/asm/irq_pipeline.h b/arch/x86/include/asm/irq_pipeline.h
+index fc6e0ce24685..a2e1bc865656 100644
+--- a/arch/x86/include/asm/irq_pipeline.h
++++ b/arch/x86/include/asm/irq_pipeline.h
+@@ -15,6 +15,7 @@
+ #define FIRST_SYSTEM_IRQ	NR_IRQS
+ #define TIMER_OOB_IPI		apicm_vector_irq(TIMER_OOB_VECTOR)
+ #define RESCHEDULE_OOB_IPI	apicm_vector_irq(RESCHEDULE_OOB_VECTOR)
++#define CALL_FUNCTION_OOB_IPI	apicm_vector_irq(CALL_FUNCTION_OOB_VECTOR)
+ #define apicm_irq_vector(__irq) ((__irq) - FIRST_SYSTEM_IRQ + FIRST_SYSTEM_VECTOR)
+ #define apicm_vector_irq(__vec) ((__vec) - FIRST_SYSTEM_VECTOR + FIRST_SYSTEM_IRQ)
+ 
+diff --git a/arch/x86/include/asm/irq_vectors.h b/arch/x86/include/asm/irq_vectors.h
+index eef55fef04b0..13288f177b61 100644
+--- a/arch/x86/include/asm/irq_vectors.h
++++ b/arch/x86/include/asm/irq_vectors.h
+@@ -102,7 +102,8 @@
+ #ifdef CONFIG_IRQ_PIPELINE
+ #define TIMER_OOB_VECTOR		0xeb
+ #define RESCHEDULE_OOB_VECTOR		0xea
+-#define FIRST_SYSTEM_APIC_VECTOR	RESCHEDULE_OOB_VECTOR
++#define CALL_FUNCTION_OOB_VECTOR	0xe9
++#define FIRST_SYSTEM_APIC_VECTOR	CALL_FUNCTION_OOB_VECTOR
+ #define NR_APIC_VECTORS	        	(NR_VECTORS - FIRST_SYSTEM_VECTOR)
+ #else
+ #define FIRST_SYSTEM_APIC_VECTOR	LOCAL_TIMER_VECTOR
+diff --git a/arch/x86/kernel/idt.c b/arch/x86/kernel/idt.c
+index 201e7de9c856..6ae90fb10691 100644
+--- a/arch/x86/kernel/idt.c
++++ b/arch/x86/kernel/idt.c
+@@ -133,8 +133,9 @@ static const __initconst struct idt_data apic_idts[] = {
+ 	INTG(CALL_FUNCTION_SINGLE_VECTOR,	asm_sysvec_call_function_single),
+ 	INTG(REBOOT_VECTOR,			asm_sysvec_reboot),
+ #ifdef CONFIG_IRQ_PIPELINE
+-	INTG(RESCHEDULE_OOB_VECTOR,		asm_sysvec_reschedule_oob_ipi),
+ 	INTG(TIMER_OOB_VECTOR,			asm_sysvec_timer_oob_ipi),
++	INTG(RESCHEDULE_OOB_VECTOR,		asm_sysvec_reschedule_oob_ipi),
++	INTG(CALL_FUNCTION_OOB_VECTOR,		asm_sysvec_call_function_oob_ipi),
+ #endif
+ #endif
+ 
+diff --git a/arch/x86/kernel/irq_pipeline.c b/arch/x86/kernel/irq_pipeline.c
+index 96febd496a4c..d9d0e75a60b2 100644
+--- a/arch/x86/kernel/irq_pipeline.c
++++ b/arch/x86/kernel/irq_pipeline.c
+@@ -338,15 +338,19 @@ static void create_x86_apic_domain(void)
+ 
+ #ifdef CONFIG_SMP
+ 
++DEFINE_IDTENTRY_SYSVEC_PIPELINED(TIMER_OOB_VECTOR,
++				 sysvec_timer_oob_ipi)
++{ /* In-band handler is unused. */ }
++
+ DEFINE_IDTENTRY_SYSVEC_PIPELINED(RESCHEDULE_OOB_VECTOR,
+ 				 sysvec_reschedule_oob_ipi)
+ { /* In-band handler is unused. */ }
+ 
+-DEFINE_IDTENTRY_SYSVEC_PIPELINED(TIMER_OOB_VECTOR,
+-				 sysvec_timer_oob_ipi)
++DEFINE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_OOB_VECTOR,
++				 sysvec_call_function_oob_ipi)
+ { /* In-band handler is unused. */ }
+ 
+-#endif
++#endif	/* !CONFIG_SMP */
+ 
+ void __init arch_irq_pipeline_init(void)
+ {
+-- 
+2.43.0
+

@@ -1,0 +1,55 @@
+From aa680720e499bbaefee45fccd2e431d2b8501d92 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 2 Jan 2025 18:13:47 +0100
+Subject: [PATCH 170/174] dovetail: net: rename oob_data to sk_oob_ctx in
+ struct sock
+
+The notion of "oob data" is used across several kernel subsystems,
+particularly in the networking area. Dovetail's notion of out-of-band
+relates to the execution context of a CPU on the high priority stage
+of the interrupt pipeline instead (i.e. the one which runs
+asynchronously to the regular scheduling of operations).
+
+Mitigate the confusion in struct file by moving from the way too
+generic "data" to "context", abiding by the common naming scheme there
+in the same move, i.e. s/oob_data/sk_oob_ctx/.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/net/sock.h | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 315d6929b893..e31ce3b02a1b 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -542,7 +542,7 @@ struct sock {
+ 	void                    (*sk_destruct)(struct sock *sk);
+ 	struct sock_reuseport __rcu	*sk_reuseport_cb;
+ #ifdef CONFIG_NET_OOB
+-	void			*oob_data;
++	void			*sk_oob_ctx;
+ #endif
+ #ifdef CONFIG_BPF_SYSCALL
+ 	struct bpf_local_storage __rcu	*sk_bpf_storage;
+@@ -1923,7 +1923,7 @@ void sock_pfree(struct sk_buff *skb);
+ 
+ static inline bool sock_oob_capable(struct socket *sock)
+ {
+-	return sock && sock->sk && sock->sk->oob_data;
++	return sock && sock->sk && sock->sk->sk_oob_ctx;
+ }
+ 
+ int sock_oob_bind(struct sock *sk,
+@@ -1934,7 +1934,7 @@ int sock_oob_shutdown(struct sock *sk, int how);
+ static inline void sock_oob_destruct(struct sock *sk)
+ {
+ 	void sock_oob_destroy(struct sock *sk);
+-	if (sk->oob_data)
++	if (sk->sk_oob_ctx)
+ 		sock_oob_destroy(sk);
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,50 @@
+From 45139d9f5f638418d022296ec67186fc9e67801d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sun, 11 Dec 2016 16:32:28 +0100
+Subject: [PATCH 010/174] arm64/thread: add thread-local (synchronous) flags
+
+Provide per-thread storage for private flags (i.e. lockless access is
+safe).
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/include/asm/thread_info.h | 3 +++
+ arch/arm64/kernel/asm-offsets.c      | 1 +
+ 2 files changed, 4 insertions(+)
+
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index 553d1bc559c6..58c267d6934f 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -23,6 +23,7 @@ struct task_struct;
+  */
+ struct thread_info {
+ 	unsigned long		flags;		/* low level flags */
++	unsigned long		local_flags;	/* local (synchronous) flags */
+ #ifdef CONFIG_ARM64_SW_TTBR0_PAN
+ 	u64			ttbr0;		/* saved TTBR0_EL1 */
+ #endif
+@@ -55,6 +56,8 @@ struct thread_info {
+ void arch_setup_new_exec(void);
+ #define arch_setup_new_exec     arch_setup_new_exec
+ 
++#define ti_local_flags(__ti)	((__ti)->local_flags)
++
+ #endif
+ 
+ #define TIF_SIGPENDING		0	/* signal pending */
+diff --git a/arch/arm64/kernel/asm-offsets.c b/arch/arm64/kernel/asm-offsets.c
+index ea2d740db81c..3efb92a14b7f 100644
+--- a/arch/arm64/kernel/asm-offsets.c
++++ b/arch/arm64/kernel/asm-offsets.c
+@@ -33,6 +33,7 @@ int main(void)
+   BLANK();
+   DEFINE(TSK_TI_CPU,		offsetof(struct task_struct, thread_info.cpu));
+   DEFINE(TSK_TI_FLAGS,		offsetof(struct task_struct, thread_info.flags));
++  DEFINE(TSK_TI_LOCAL_FLAGS,	offsetof(struct task_struct, thread_info.local_flags));
+   DEFINE(TSK_TI_PREEMPT,	offsetof(struct task_struct, thread_info.preempt_count));
+ #ifdef CONFIG_ARM64_SW_TTBR0_PAN
+   DEFINE(TSK_TI_TTBR0,		offsetof(struct task_struct, thread_info.ttbr0));
+-- 
+2.43.0
+

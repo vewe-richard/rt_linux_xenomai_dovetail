@@ -1,0 +1,28 @@
+From 2572eee29fcd02f6a8dd77048462dd4f128329be Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Wed, 20 Nov 2024 08:43:55 +0100
+Subject: [PATCH 166/174] ARM: irq_pipeline: smp_twd: fix unwanted double-ack
+
+See https://lore.kernel.org/xenomai/87jzcze0hx.fsf@xenomai.org/
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm/kernel/smp_twd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/kernel/smp_twd.c b/arch/arm/kernel/smp_twd.c
+index 8377f1d030c3..194d3cc7ca2c 100644
+--- a/arch/arm/kernel/smp_twd.c
++++ b/arch/arm/kernel/smp_twd.c
+@@ -181,7 +181,7 @@ static irqreturn_t twd_handler(int irq, void *dev_id)
+ {
+ 	struct clock_event_device *evt = dev_id;
+ 
+-	if (twd_timer_ack()) {
++	if ((running_inband() && clockevent_is_oob(evt)) || twd_timer_ack()) {
+ 		clockevents_handle_event(evt);
+ 		return IRQ_HANDLED;
+ 	}
+-- 
+2.43.0
+
