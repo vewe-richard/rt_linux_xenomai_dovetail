@@ -1,0 +1,156 @@
+From 40b5b762a563bcae039aea0d2e2ad6e2cd8340c9 Mon Sep 17 00:00:00 2001
+From: vewe-richard <jiang.j.qian@qq.com>
+Date: Fri, 15 May 2026 16:34:01 +0800
+Subject: [PATCH 132/175] x86: dovetail: Allow multiple HV guest extensions to
+ be enabled
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/x86/include/asm/idtentry.h  | 15 +++++++++++++++
+ arch/x86/kernel/cpu/acrn.c       |  2 +-
+ arch/x86/kernel/cpu/mshyperv.c   |  2 +-
+ arch/x86/kernel/irq_pipeline.c   | 18 ++++++++----------
+ arch/x86/kernel/kvm.c            |  2 +-
+ drivers/xen/events/events_base.c |  2 +-
+ 6 files changed, 27 insertions(+), 14 deletions(-)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index ab66216a0741..cd507d36a80e 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -235,6 +235,13 @@ __visible __noreturn void __##func(struct pt_regs *regs)
+ #define DEFINE_IDTENTRY_SYSVEC_SIMPLE_PIPELINED(vector, func)		\
+ 	DEFINE_IDTENTRY_SYSVEC_PIPELINED(vector, func)
+ 
++extern void (*pipeline_hv_callback_fn)(struct pt_regs *regs);
++static inline void pipeline_install_sysvec(int vector, const void *function)
++{
++	if (vector == HYPERVISOR_CALLBACK_VECTOR)
++		pipeline_hv_callback_fn = function;
++}
++
+ #else  /* !CONFIG_IRQ_PIPELINE */
+ 
+ #define DECLARE_IDTENTRY_SYSVEC_PIPELINED(vector, func)		DECLARE_IDTENTRY_SYSVEC(vector, func)
+@@ -274,6 +281,8 @@ __visible noinstr void func(struct pt_regs *regs,			\
+ 									\
+ static noinline void __##func(struct pt_regs *regs, u32 vector)
+ 
++static inline void pipeline_install_sysvec(vector, function) {}
++
+ #endif	/* !CONFIG_IRQ_PIPELINE */
+ 
+ /**
+@@ -514,6 +523,12 @@ __visible noinstr void func(struct pt_regs *regs,			\
+ #define DEFINE_FREDENTRY_DEBUG		DEFINE_FREDENTRY_RAW
+ #endif
+ 
++#define sysvec_install(vector, function)                       \
++	{                                                      \
++		pipeline_install_sysvec(vector, __##function); \
++		alloc_intr_gate(vector, asm_##function);       \
++	}
++
+ #else /* !__ASSEMBLY__ */
+ 
+ /*
+diff --git a/arch/x86/kernel/cpu/acrn.c b/arch/x86/kernel/cpu/acrn.c
+index fffcf2e48e93..54128c9972d5 100644
+--- a/arch/x86/kernel/cpu/acrn.c
++++ b/arch/x86/kernel/cpu/acrn.c
+@@ -27,7 +27,7 @@ static u32 __init acrn_detect(void)
+ static void __init acrn_init_platform(void)
+ {
+ 	/* Setup the IDT for ACRN hypervisor callback */
+-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_acrn_hv_callback);
++	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_acrn_hv_callback);
+ 
+ 	x86_platform.calibrate_tsc = acrn_get_tsc_khz;
+ 	x86_platform.calibrate_cpu = acrn_get_tsc_khz;
+diff --git a/arch/x86/kernel/cpu/mshyperv.c b/arch/x86/kernel/cpu/mshyperv.c
+index 7288fc2d2881..32ae9dc47057 100644
+--- a/arch/x86/kernel/cpu/mshyperv.c
++++ b/arch/x86/kernel/cpu/mshyperv.c
+@@ -586,7 +586,7 @@ static void __init ms_hyperv_init_platform(void)
+ 	x86_platform.apic_post_init = hyperv_init;
+ 	hyperv_setup_mmu_ops();
+ 	/* Setup the IDT for hypervisor callback */
+-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_hyperv_callback);
++	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_hyperv_callback);
+ 
+ 	/* Setup the IDT for reenlightenment notifications */
+ 	if (ms_hyperv.features & HV_ACCESS_REENLIGHTENMENT) {
+diff --git a/arch/x86/kernel/irq_pipeline.c b/arch/x86/kernel/irq_pipeline.c
+index a6beb0040036..d001efd4b002 100644
+--- a/arch/x86/kernel/irq_pipeline.c
++++ b/arch/x86/kernel/irq_pipeline.c
+@@ -14,6 +14,8 @@
+ #include <asm/mshyperv.h>
+ #include <asm/idtentry.h>
+ 
++void (*pipeline_hv_callback_fn)(struct pt_regs *regs) = NULL;
++
+ static struct irq_domain *sipic_domain;
+ 
+ static void sipic_irq_noop(struct irq_data *data) { }
+@@ -76,6 +78,11 @@ static void pipeline_exit_rcu(irqentry_state_t state)
+ 		ct_irq_exit();
+ }
+ 
++static void pipeline_hv_callback(struct pt_regs *regs)
++{
++	pipeline_hv_callback_fn(regs);
++}
++
+ static void do_sysvec_inband(struct irq_desc *desc, struct pt_regs *regs)
+ {
+ 	unsigned int irq = irq_desc_get_irq(desc);
+@@ -150,18 +157,9 @@ static void do_sysvec_inband(struct irq_desc *desc, struct pt_regs *regs)
+ 					regs);
+ 		break;
+ #endif
+-#ifdef CONFIG_ACRN_GUEST
+ 	case HYPERVISOR_CALLBACK_VECTOR:
+-		run_sysvec_on_irqstack_cond(__sysvec_acrn_hv_callback,
+-					regs);
++		run_sysvec_on_irqstack_cond(pipeline_hv_callback, regs);
+ 		break;
+-#endif
+-#ifdef CONFIG_KVM_GUEST
+-	case HYPERVISOR_CALLBACK_VECTOR:
+-		run_sysvec_on_irqstack_cond(__sysvec_kvm_asyncpf_interrupt,
+-					    regs);
+-		break;
+-#endif
+ 	case LOCAL_TIMER_VECTOR:
+ 		run_sysvec_on_irqstack_cond(__sysvec_apic_timer_interrupt,
+ 					regs);
+diff --git a/arch/x86/kernel/kvm.c b/arch/x86/kernel/kvm.c
+index c7ef9efd4f30..d6d66e5e2d4e 100644
+--- a/arch/x86/kernel/kvm.c
++++ b/arch/x86/kernel/kvm.c
+@@ -839,7 +839,7 @@ static void __init kvm_guest_init(void)
+ 
+ 	if (kvm_para_has_feature(KVM_FEATURE_ASYNC_PF_INT) && kvmapf) {
+ 		static_branch_enable(&kvm_async_pf_enabled);
+-		alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_kvm_asyncpf_interrupt);
++		sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_kvm_asyncpf_interrupt);
+ 	}
+ 
+ #ifdef CONFIG_SMP
+diff --git a/drivers/xen/events/events_base.c b/drivers/xen/events/events_base.c
+index 3a8f2e659e00..27d4984c5550 100644
+--- a/drivers/xen/events/events_base.c
++++ b/drivers/xen/events/events_base.c
+@@ -2256,7 +2256,7 @@ static __init void xen_alloc_callback_vector(void)
+ 		return;
+ 
+ 	pr_info("Xen HVM callback vector for event delivery is enabled\n");
+-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_xen_hvm_callback);
++	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_xen_hvm_callback);
+ }
+ #else
+ void xen_setup_callback_vector(void) {}
+-- 
+2.43.0
+

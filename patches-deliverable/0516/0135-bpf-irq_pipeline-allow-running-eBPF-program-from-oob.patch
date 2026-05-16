@@ -1,0 +1,55 @@
+From 6e72f46139de6d047f82c6cfb0eb284c3039463d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 22 Feb 2024 14:46:41 +0100
+Subject: [PATCH 135/175] bpf: irq_pipeline: allow running eBPF program from
+ oob stage
+
+The support is basic, meaning that we allow __bpf_prog_run() to
+execute safely from the oob stage, which boils down to hardening the
+path dealing with runtime statistics. Only oob-safe eBPF helpers may
+be called by the filter code in such context.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/linux/filter.h | 10 ++++++++--
+ kernel/bpf/Kconfig     |  3 +++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index ad5a3d68b555..d1c0d4cd7be8 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -604,10 +604,16 @@ static __always_inline u32 __bpf_prog_run(const struct bpf_prog *prog,
+ 
+ 		ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+ 		stats = this_cpu_ptr(prog->stats);
+-		flags = u64_stats_update_begin_irqsave(&stats->syncp);
++		if (IS_ENABLED(CONFIG_BPF_OOB))
++			flags = u64_stats_update_begin_hard_irqsave(&stats->syncp);
++		else
++			flags = u64_stats_update_begin_irqsave(&stats->syncp);
+ 		u64_stats_inc(&stats->cnt);
+ 		u64_stats_add(&stats->nsecs, sched_clock() - start);
+-		u64_stats_update_end_irqrestore(&stats->syncp, flags);
++		if (IS_ENABLED(CONFIG_BPF_OOB))
++			u64_stats_update_end_hard_irqrestore(&stats->syncp, flags);
++		else
++			u64_stats_update_end_irqrestore(&stats->syncp, flags);
+ 	} else {
+ 		ret = dfunc(ctx, prog->insnsi, prog->bpf_func);
+ 	}
+diff --git a/kernel/bpf/Kconfig b/kernel/bpf/Kconfig
+index 6a906ff93006..1fa27929bc01 100644
+--- a/kernel/bpf/Kconfig
++++ b/kernel/bpf/Kconfig
+@@ -100,4 +100,7 @@ config BPF_LSM
+ 
+ 	  If you are unsure how to answer this question, answer N.
+ 
++config BPF_OOB
++	bool
++
+ endmenu # "BPF subsystem"
+-- 
+2.43.0
+

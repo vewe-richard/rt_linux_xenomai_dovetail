@@ -9,7 +9,7 @@ XENO_LDFLAGS := -L$(XENO_PREFIX)/lib -Wl,-rpath,$(XENO_PREFIX)/lib
 XENO_LIBS    := -lcobalt -lpthread -lrt
 XENO_WRAPS   := -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=read -Wl,--wrap=write -Wl,--wrap=ioctl
 
-KERNEL_SRC   ?= ../linux-dovetail
+KERNEL_SRC   ?= ../qcom
 
 .PHONY: all clean kmod apps
 

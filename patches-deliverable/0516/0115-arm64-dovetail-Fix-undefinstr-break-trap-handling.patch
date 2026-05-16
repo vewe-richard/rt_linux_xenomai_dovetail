@@ -1,0 +1,94 @@
+From dc884b814d9246485749a6c32e148d2b2d44d12a Mon Sep 17 00:00:00 2001
+From: Clara Kowalsky <clara.kowalsky@siemens.com>
+Date: Tue, 24 Oct 2023 11:32:42 +0200
+Subject: [PATCH 115/175] arm64: dovetail: Fix undefinstr/break trap handling
+
+When running an compat RT application on arm64 the break trap is
+handled via the undefined instruction trap.
+
+A possible call stack looks like this:
+
+Call trace:
+  handle_inband_event+0x2d0/0x320
+  inband_event_notify+0x28/0x50
+  signal_wake_up_state+0x7c/0xa4
+  complete_signal+0x104/0x2d0
+  __send_signal_locked+0x1d0/0x3e4
+  send_signal_locked+0xf0/0x140
+  force_sig_info_to_task+0xa0/0x164
+  force_sig_fault+0x64/0x94
+  arm64_force_sig_fault+0x48/0x80
+  send_user_sigtrap+0x50/0x8c
+  aarch32_break_handler+0xac/0x1d0
+  do_undefinstr+0x6c/0x360
+  el0_undef+0x4c/0xd0
+  el0t_32_sync_handler+0xd0/0x140
+  el0t_32_sync+0x190/0x194
+
+The trap is never reported to the companion core at that stage so
+running_oob() in do_undefinstr() will always return true. As the
+following bailout happens before calling the compat breakpoint
+detection (aarch32_break_handler()) debugging the compat
+application does not work.
+
+In addition the emulation of the deprecated armv8 SWP{B} instruction
+(try_emulate_armv8_deprecated()) cannot be done from the out-of-band
+stage.
+
+Therefore do_undefinstr()/do_el0_undef reports the trap entry to the
+companion core. If the companion core handles the undefined instruction,
+running_oob returns true and the bailout occurs. Otherwise, switching to
+the in-band stage takes place and the undefined instruction handler
+continues with the compat breakpoint detection and the SWP{B}
+instruction emulation.
+
+Signed-off-by: Clara Kowalsky <clara.kowalsky@siemens.com>
+---
+ arch/arm64/kernel/traps.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index ed0defd989ce..21dce31cbd30 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -456,29 +456,32 @@ void do_el0_undef(struct pt_regs *regs, unsigned long esr)
+ {
+ 	u32 insn;
+ 
++	mark_trap_entry(ARM64_TRAP_UNDI, regs);
++
+ 	/*
+ 	 * If the companion core did not switched us to in-band
+ 	 * context, we may assume that it has handled the trap.
+ 	 */
+ 	if (running_oob())
+-		return;
++		goto out_exit;
+ 
+ 	/* check for AArch32 breakpoint instructions */
+ 	if (!aarch32_break_handler(regs))
+-		return;
++		goto out_exit;
+ 
+ 	if (user_insn_read(regs, &insn))
+ 		goto out_err;
+ 
+ 	if (try_emulate_mrs(regs, insn))
+-		return;
++		goto out_exit;
+ 
+ 	if (try_emulate_armv8_deprecated(regs, insn))
+-		return;
++		goto out_exit;
+ 
+ out_err:
+-	mark_trap_entry(ARM64_TRAP_UNDI, regs);
+ 	force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
++
++out_exit:
+ 	mark_trap_exit(ARM64_TRAP_UNDI, regs);
+ }
+ 
+-- 
+2.43.0
+

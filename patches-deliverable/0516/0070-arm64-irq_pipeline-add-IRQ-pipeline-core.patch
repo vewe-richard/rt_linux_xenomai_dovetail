@@ -1,0 +1,1236 @@
+From 19d141ceb1575d729def6c7da2ec1bf1edb39f2d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 24 Aug 2017 19:39:20 +0200
+Subject: [PATCH 070/175] arm64: irq_pipeline: add IRQ pipeline core
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+
+arm64: irq_pipeline: Fix cast-function-type warning
+
+Resolves
+
+../arch/arm64/kernel/entry-common.c: In function ‘do_interrupt_handler’:
+../arch/arm64/kernel/entry-common.c:434:13: warning: cast between incompatible function types from ‘int (*)(struct pt_regs *)’ to ‘void (*)(struct pt_regs *)’ [-Wcast-function-type]
+  434 |   handler = (void (*)(struct pt_regs *))handle_irq_pipelined;
+      |             ^
+
+which is harmless in this context.
+
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+---
+ arch/arm64/Kconfig                    |   1 +
+ arch/arm64/include/asm/daifflags.h    |  14 +-
+ arch/arm64/include/asm/irq_pipeline.h | 148 +++++++++++++++
+ arch/arm64/include/asm/irqflags.h     |  27 ++-
+ arch/arm64/include/asm/mmu_context.h  |  11 ++
+ arch/arm64/include/asm/ptrace.h       |   6 +
+ arch/arm64/include/asm/thread_info.h  |   9 +-
+ arch/arm64/kernel/Makefile            |   1 +
+ arch/arm64/kernel/entry-common.c      | 252 +++++++++++++++++++++++---
+ arch/arm64/kernel/irq.c               |   4 +-
+ arch/arm64/kernel/irq_pipeline.c      |  24 +++
+ arch/arm64/kernel/process.c           |   4 +
+ arch/arm64/kernel/signal.c            |  18 +-
+ arch/arm64/kernel/smp.c               | 108 +++++++++--
+ arch/arm64/kernel/syscall.c           |   7 +
+ arch/arm64/kernel/traps.c             |   3 +-
+ arch/arm64/mm/fault.c                 |   4 +-
+ 17 files changed, 581 insertions(+), 60 deletions(-)
+ create mode 100644 arch/arm64/include/asm/irq_pipeline.h
+ create mode 100644 arch/arm64/kernel/irq_pipeline.c
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 1be9f1f6b320..9cc78ae49e3e 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -214,6 +214,7 @@ config ARM64
+ 		HW_PERF_EVENTS && HAVE_PERF_EVENTS_NMI
+ 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
+ 	select HAVE_IOREMAP_PROT
++	select HAVE_IRQ_PIPELINE
+ 	select HAVE_IRQ_TIME_ACCOUNTING
+ 	select HAVE_KVM
+ 	select HAVE_MOD_ARCH_SPECIFIC
+diff --git a/arch/arm64/include/asm/daifflags.h b/arch/arm64/include/asm/daifflags.h
+index 55f57dfa8e2f..9f863ce0ac9e 100644
+--- a/arch/arm64/include/asm/daifflags.h
++++ b/arch/arm64/include/asm/daifflags.h
+@@ -12,6 +12,12 @@
+ #include <asm/cpufeature.h>
+ #include <asm/ptrace.h>
+ 
++/*
++ * irq_pipeline: DAIF masking is only used in contexts where hard
++ * interrupt masking applies, so no need to virtualize for the inband
++ * stage here (the pipeline core does assume this).
++ */
++
+ #define DAIF_PROCCTX		0
+ #define DAIF_PROCCTX_NOIRQ	(PSR_I_BIT | PSR_F_BIT)
+ #define DAIF_ERRCTX		(PSR_A_BIT | PSR_I_BIT | PSR_F_BIT)
+@@ -35,7 +41,7 @@ static inline void local_daif_mask(void)
+ 	if (system_uses_irq_prio_masking())
+ 		gic_write_pmr(GIC_PRIO_IRQON | GIC_PRIO_PSR_I_SET);
+ 
+-	trace_hardirqs_off();
++	trace_hardirqs_off_pipelined();
+ }
+ 
+ static inline unsigned long local_daif_save_flags(void)
+@@ -72,7 +78,7 @@ static inline void local_daif_restore(unsigned long flags)
+ 		(read_sysreg(daif) & (PSR_I_BIT | PSR_F_BIT)) != (PSR_I_BIT | PSR_F_BIT));
+ 
+ 	if (!irq_disabled) {
+-		trace_hardirqs_on();
++		trace_hardirqs_on_pipelined();
+ 
+ 		if (system_uses_irq_prio_masking()) {
+ 			gic_write_pmr(GIC_PRIO_IRQON);
+@@ -117,7 +123,7 @@ static inline void local_daif_restore(unsigned long flags)
+ 	write_sysreg(flags, daif);
+ 
+ 	if (irq_disabled)
+-		trace_hardirqs_off();
++		trace_hardirqs_off_pipelined();
+ }
+ 
+ /*
+@@ -129,7 +135,7 @@ static inline void local_daif_inherit(struct pt_regs *regs)
+ 	unsigned long flags = regs->pstate & DAIF_MASK;
+ 
+ 	if (interrupts_enabled(regs))
+-		trace_hardirqs_on();
++		trace_hardirqs_on_pipelined();
+ 
+ 	if (system_uses_irq_prio_masking())
+ 		gic_write_pmr(regs->pmr_save);
+diff --git a/arch/arm64/include/asm/irq_pipeline.h b/arch/arm64/include/asm/irq_pipeline.h
+new file mode 100644
+index 000000000000..09388dc1cbf0
+--- /dev/null
++++ b/arch/arm64/include/asm/irq_pipeline.h
+@@ -0,0 +1,148 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (C) 2018 Philippe Gerum  <rpm@xenomai.org>.
++ */
++#ifndef _ASM_ARM64_IRQ_PIPELINE_H
++#define _ASM_ARM64_IRQ_PIPELINE_H
++
++#include <asm-generic/irq_pipeline.h>
++
++#ifdef CONFIG_IRQ_PIPELINE
++
++/*
++ * In order to cope with the limited number of SGIs available to us,
++ * In-band IPI messages are multiplexed over SGI0, whereas out-of-band
++ * IPIs are directly mapped to SGI1-2.
++ */
++#define OOB_NR_IPI		2
++#define OOB_IPI_OFFSET		1 /* SGI1 */
++#define TIMER_OOB_IPI		(ipi_irq_base + OOB_IPI_OFFSET)
++#define RESCHEDULE_OOB_IPI	(TIMER_OOB_IPI + 1)
++
++extern int ipi_irq_base;
++
++static inline notrace
++unsigned long arch_irqs_virtual_to_native_flags(int stalled)
++{
++	return (!!stalled) << IRQMASK_I_POS;
++}
++
++static inline notrace
++unsigned long arch_irqs_native_to_virtual_flags(unsigned long flags)
++{
++	return (!!hard_irqs_disabled_flags(flags)) << IRQMASK_i_POS;
++}
++
++static inline notrace unsigned long arch_local_irq_save(void)
++{
++	int stalled = inband_irq_save();
++	barrier();
++	return arch_irqs_virtual_to_native_flags(stalled);
++}
++
++static inline notrace void arch_local_irq_enable(void)
++{
++	barrier();
++	inband_irq_enable();
++}
++
++static inline notrace void arch_local_irq_disable(void)
++{
++	inband_irq_disable();
++	barrier();
++}
++
++static inline notrace unsigned long arch_local_save_flags(void)
++{
++	int stalled = inband_irqs_disabled();
++	barrier();
++	return arch_irqs_virtual_to_native_flags(stalled);
++}
++
++static inline int arch_irqs_disabled_flags(unsigned long flags)
++{
++	return native_irqs_disabled_flags(flags);
++}
++
++static inline notrace void arch_local_irq_restore(unsigned long flags)
++{
++	inband_irq_restore(arch_irqs_disabled_flags(flags));
++	barrier();
++}
++
++static inline
++void arch_save_timer_regs(struct pt_regs *dst, struct pt_regs *src)
++{
++	dst->pstate = src->pstate;
++	dst->pc = src->pc;
++}
++
++static inline bool arch_steal_pipelined_tick(struct pt_regs *regs)
++{
++	return !!(regs->pstate & IRQMASK_I_BIT);
++}
++
++static inline int arch_enable_oob_stage(void)
++{
++	return 0;
++}
++
++extern void (*handle_arch_irq)(struct pt_regs *);
++
++static inline void arch_handle_irq_pipelined(struct pt_regs *regs)
++{
++	handle_arch_irq(regs);
++}
++
++/*
++ * We use neither the generic entry code nor
++ * kentry_enter/exit_pipelined yet. We still build a no-op version of
++ * the latter for now, until we enventually switch to using whichever
++ * of them is available first.
++ */
++#define arch_kentry_get_irqstate(__regs)	0
++
++#define arch_kentry_set_irqstate(__regs, __irqstate)	\
++	do { (void)__irqstate; } while (0)
++
++#else  /* !CONFIG_IRQ_PIPELINE */
++
++static inline unsigned long arch_local_irq_save(void)
++{
++	return native_irq_save();
++}
++
++static inline void arch_local_irq_enable(void)
++{
++	native_irq_enable();
++}
++
++static inline void arch_local_irq_disable(void)
++{
++	native_irq_disable();
++}
++
++static inline unsigned long arch_local_save_flags(void)
++{
++	return native_save_flags();
++}
++
++static inline void arch_local_irq_restore(unsigned long flags)
++{
++	native_irq_restore(flags);
++}
++
++static inline int arch_irqs_disabled_flags(unsigned long flags)
++{
++	return native_irqs_disabled_flags(flags);
++}
++
++#endif /* !CONFIG_IRQ_PIPELINE */
++
++static inline int arch_irqs_disabled(void)
++{
++	return arch_irqs_disabled_flags(arch_local_save_flags());
++}
++
++#endif /* _ASM_ARM64_IRQ_PIPELINE_H */
+diff --git a/arch/arm64/include/asm/irqflags.h b/arch/arm64/include/asm/irqflags.h
+index 1f31ec146d16..c53d8c5f5e98 100644
+--- a/arch/arm64/include/asm/irqflags.h
++++ b/arch/arm64/include/asm/irqflags.h
+@@ -10,6 +10,10 @@
+ #include <asm/ptrace.h>
+ #include <asm/sysreg.h>
+ 
++#define IRQMASK_I_BIT	PSR_I_BIT
++#define IRQMASK_I_POS	7
++#define IRQMASK_i_POS	31
++
+ /*
+  * Aarch64 has flags for masking: Debug, Asynchronous (serror), Interrupts and
+  * FIQ exceptions, in the 'daif' register. We mask and unmask them in 'daif'
+@@ -47,7 +51,7 @@ static __always_inline void __pmr_local_irq_enable(void)
+ 	barrier();
+ }
+ 
+-static inline void arch_local_irq_enable(void)
++static inline void native_irq_enable(void)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		__pmr_local_irq_enable();
+@@ -75,7 +79,7 @@ static __always_inline void __pmr_local_irq_disable(void)
+ 	barrier();
+ }
+ 
+-static inline void arch_local_irq_disable(void)
++static inline void native_irq_disable(void)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		__pmr_local_irq_disable();
+@@ -94,10 +98,17 @@ static __always_inline unsigned long __pmr_local_save_flags(void)
+ 	return read_sysreg_s(SYS_ICC_PMR_EL1);
+ }
+ 
++static inline void native_irq_sync(void)
++{
++	native_irq_enable();
++	isb();
++	native_irq_disable();
++}
++
+ /*
+  * Save the current interrupt enable state.
+  */
+-static inline unsigned long arch_local_save_flags(void)
++static inline unsigned long native_save_flags(void)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		return __pmr_local_save_flags();
+@@ -116,7 +127,7 @@ static __always_inline bool __pmr_irqs_disabled_flags(unsigned long flags)
+ 	return flags != GIC_PRIO_IRQON;
+ }
+ 
+-static inline bool arch_irqs_disabled_flags(unsigned long flags)
++static inline bool native_irqs_disabled_flags(unsigned long flags)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		return __pmr_irqs_disabled_flags(flags);
+@@ -135,7 +146,7 @@ static __always_inline bool __pmr_irqs_disabled(void)
+ 	return __pmr_irqs_disabled_flags(__pmr_local_save_flags());
+ }
+ 
+-static inline bool arch_irqs_disabled(void)
++static inline bool native_irqs_disabled(void)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		return __pmr_irqs_disabled();
+@@ -167,7 +178,7 @@ static __always_inline unsigned long __pmr_local_irq_save(void)
+ 	return flags;
+ }
+ 
+-static inline unsigned long arch_local_irq_save(void)
++static inline unsigned long native_irq_save(void)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		return __pmr_local_irq_save();
+@@ -194,7 +205,7 @@ static __always_inline void __pmr_local_irq_restore(unsigned long flags)
+ /*
+  * restore saved IRQ state
+  */
+-static inline void arch_local_irq_restore(unsigned long flags)
++static inline void native_irq_restore(unsigned long flags)
+ {
+ 	if (__irqflags_uses_pmr()) {
+ 		__pmr_local_irq_restore(flags);
+@@ -203,4 +214,6 @@ static inline void arch_local_irq_restore(unsigned long flags)
+ 	}
+ }
+ 
++#include <asm/irq_pipeline.h>
++
+ #endif /* __ASM_IRQFLAGS_H */
+diff --git a/arch/arm64/include/asm/mmu_context.h b/arch/arm64/include/asm/mmu_context.h
+index 3d2e074bedbc..5672e5a9ff64 100644
+--- a/arch/arm64/include/asm/mmu_context.h
++++ b/arch/arm64/include/asm/mmu_context.h
+@@ -107,6 +107,9 @@ static inline void __cpu_set_tcr_t0sz(unsigned long t0sz)
+ static inline void cpu_uninstall_idmap(void)
+ {
+ 	struct mm_struct *mm = current->active_mm;
++	unsigned long flags;
++
++	flags = hard_cond_local_irq_save();
+ 
+ 	cpu_set_reserved_ttbr0();
+ 	local_flush_tlb_all();
+@@ -114,15 +117,23 @@ static inline void cpu_uninstall_idmap(void)
+ 
+ 	if (mm != &init_mm && !system_uses_ttbr0_pan())
+ 		cpu_switch_mm(mm->pgd, mm);
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ static inline void __cpu_install_idmap(pgd_t *idmap)
+ {
++	unsigned long flags;
++
++	flags = hard_cond_local_irq_save();
++
+ 	cpu_set_reserved_ttbr0();
+ 	local_flush_tlb_all();
+ 	cpu_set_idmap_tcr_t0sz();
+ 
+ 	cpu_switch_mm(lm_alias(idmap), &init_mm);
++
++	hard_cond_local_irq_restore(flags);
+ }
+ 
+ static inline void cpu_install_idmap(void)
+diff --git a/arch/arm64/include/asm/ptrace.h b/arch/arm64/include/asm/ptrace.h
+index 47ec58031f11..729044c87c47 100644
+--- a/arch/arm64/include/asm/ptrace.h
++++ b/arch/arm64/include/asm/ptrace.h
+@@ -200,7 +200,13 @@ struct pt_regs {
+ 
+ 	/* Only valid for some EL1 exceptions. */
+ 	u64 lockdep_hardirqs;
++#ifdef CONFIG_IRQ_PIPELINE
++	u64 exit_rcu : 1,
++		oob_on_entry : 1,
++		stalled_on_entry : 1;
++#else
+ 	u64 exit_rcu;
++#endif
+ };
+ 
+ static inline bool in_syscall(struct pt_regs const *regs)
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index 58c267d6934f..48e528c6fea5 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -67,6 +67,7 @@ void arch_setup_new_exec(void);
+ #define TIF_UPROBE		4	/* uprobe breakpoint or singlestep */
+ #define TIF_MTE_ASYNC_FAULT	5	/* MTE Asynchronous Tag Check Fault */
+ #define TIF_NOTIFY_SIGNAL	6	/* signal notifications exist */
++#define TIF_RETUSER		7	/* INBAND_TASK_RETUSER is pending */
+ #define TIF_SYSCALL_TRACE	8	/* syscall trace active */
+ #define TIF_SYSCALL_AUDIT	9	/* syscall auditing */
+ #define TIF_SYSCALL_TRACEPOINT	10	/* syscall tracepoint for ftrace */
+@@ -99,11 +100,12 @@ void arch_setup_new_exec(void);
+ #define _TIF_SVE		(1 << TIF_SVE)
+ #define _TIF_MTE_ASYNC_FAULT	(1 << TIF_MTE_ASYNC_FAULT)
+ #define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
++#define _TIF_RETUSER		(1 << TIF_RETUSER)
+ 
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+ 				 _TIF_UPROBE | _TIF_MTE_ASYNC_FAULT | \
+-				 _TIF_NOTIFY_SIGNAL)
++				 _TIF_NOTIFY_SIGNAL | _TIF_RETUSER)
+ 
+ #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+ 				 _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | \
+@@ -124,4 +126,9 @@ void arch_setup_new_exec(void);
+ 	INIT_SCS							\
+ }
+ 
++/*
++ * Local (synchronous) thread flags.
++ */
++#define _TLF_OOB		0x0001
++
+ #endif /* __ASM_THREAD_INFO_H */
+diff --git a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+index d95b3d6b471a..04eeddc904e4 100644
+--- a/arch/arm64/kernel/Makefile
++++ b/arch/arm64/kernel/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_ACPI_NUMA)			+= acpi_numa.o
+ obj-$(CONFIG_ARM64_ACPI_PARKING_PROTOCOL)	+= acpi_parking_protocol.o
+ obj-$(CONFIG_PARAVIRT)			+= paravirt.o
+ obj-$(CONFIG_RANDOMIZE_BASE)		+= kaslr.o pi/
++obj-$(CONFIG_IRQ_PIPELINE)		+= irq_pipeline.o
+ obj-$(CONFIG_HIBERNATION)		+= hibernate.o hibernate-asm.o
+ obj-$(CONFIG_ELF_CORE)			+= elfcore.o
+ obj-$(CONFIG_KEXEC_CORE)		+= machine_kexec.o relocate_kernel.o	\
+diff --git a/arch/arm64/kernel/entry-common.c b/arch/arm64/kernel/entry-common.c
+index 5e8204d250b4..7017e7ed12b1 100644
+--- a/arch/arm64/kernel/entry-common.c
++++ b/arch/arm64/kernel/entry-common.c
+@@ -13,12 +13,12 @@
+ #include <linux/sched.h>
+ #include <linux/sched/debug.h>
+ #include <linux/thread_info.h>
++#include <linux/irq_pipeline.h>
+ 
+ #include <asm/cpufeature.h>
+ #include <asm/daifflags.h>
+ #include <asm/esr.h>
+ #include <asm/exception.h>
+-#include <asm/irq_regs.h>
+ #include <asm/kprobes.h>
+ #include <asm/mmu.h>
+ #include <asm/processor.h>
+@@ -53,13 +53,61 @@ static __always_inline void __enter_from_kernel_mode(struct pt_regs *regs)
+ 	trace_hardirqs_off_finish();
+ }
+ 
+-static void noinstr enter_from_kernel_mode(struct pt_regs *regs)
++static void noinstr _enter_from_kernel_mode(struct pt_regs *regs)
+ {
+ 	__enter_from_kernel_mode(regs);
+ 	mte_check_tfsr_entry();
+ 	mte_disable_tco_entry(current);
+ }
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++
++static void noinstr enter_from_kernel_mode(struct pt_regs *regs)
++{
++	/*
++	 * CAUTION: we may switch in-band as a result of handling a
++	 * trap, so if we are running out-of-band, we must make sure
++	 * not to perform the RCU exit since we did not enter it in
++	 * the first place.
++	 */
++	regs->oob_on_entry = running_oob();
++	if (regs->oob_on_entry) {
++		regs->exit_rcu = false;
++		goto out;
++	}
++
++	/*
++	 * We trapped from kernel space running in-band, we need to
++	 * record the virtual interrupt state into the current
++	 * register frame (regs->stalled_on_entry) in order to
++	 * reinstate it from exit_to_kernel_mode(). Next we stall the
++	 * in-band stage in order to mirror the current hardware state
++	 * (i.e. hardirqs are off).
++	 */
++	regs->stalled_on_entry = test_and_stall_inband_nocheck();
++
++	__enter_from_kernel_mode(regs);
++
++	/*
++	 * Our caller is going to inherit the hardware interrupt state
++	 * from the trapped context once we have returned: if running
++	 * in-band, align the stall bit on the upcoming state.
++	 */
++	if (running_inband() && interrupts_enabled(regs))
++		unstall_inband_nocheck();
++out:
++	mte_check_tfsr_entry();
++}
++
++#else
++
++static void noinstr enter_from_kernel_mode(struct pt_regs *regs)
++{
++	_enter_from_kernel_mode(regs);
++}
++
++#endif	/* !CONFIG_IRQ_PIPELINE */
++
+ /*
+  * Handle IRQ/context state management when exiting to kernel mode.
+  * After this function returns it is not safe to call regular kernel code,
+@@ -91,7 +139,24 @@ static __always_inline void __exit_to_kernel_mode(struct pt_regs *regs)
+ static void noinstr exit_to_kernel_mode(struct pt_regs *regs)
+ {
+ 	mte_check_tfsr_exit();
++
++	if (running_oob())
++		return;
++
+ 	__exit_to_kernel_mode(regs);
++
++#ifdef CONFIG_IRQ_PIPELINE
++	/*
++	 * Reinstate the virtual interrupt state which was in effect
++	 * on entry to the trap.
++	 */
++	if (!regs->oob_on_entry) {
++		if (regs->stalled_on_entry)
++			stall_inband_nocheck();
++		else
++			unstall_inband_nocheck();
++	}
++#endif
+ }
+ 
+ /*
+@@ -101,11 +166,16 @@ static void noinstr exit_to_kernel_mode(struct pt_regs *regs)
+  */
+ static __always_inline void __enter_from_user_mode(void)
+ {
+-	lockdep_hardirqs_off(CALLER_ADDR0);
+-	CT_WARN_ON(ct_state() != CONTEXT_USER);
+-	user_exit_irqoff();
+-	trace_hardirqs_off_finish();
+-	mte_disable_tco_entry(current);
++	if (running_inband()) {
++		lockdep_hardirqs_off(CALLER_ADDR0);
++		WARN_ON_ONCE(irq_pipeline_debug() && test_inband_stall());
++		CT_WARN_ON(ct_state() != CONTEXT_USER);
++		stall_inband_nocheck();
++		user_exit_irqoff();
++		unstall_inband_nocheck();
++		trace_hardirqs_off_finish();
++		mte_disable_tco_entry(current);
++	}
+ }
+ 
+ static __always_inline void enter_from_user_mode(struct pt_regs *regs)
+@@ -117,33 +187,52 @@ static __always_inline void enter_from_user_mode(struct pt_regs *regs)
+  * Handle IRQ/context state management when exiting to user mode.
+  * After this function returns it is not safe to call regular kernel code,
+  * instrumentable code, or any code which may trigger an exception.
++ *
++ * irq_pipeline: prepare_exit_to_user_mode() tells the caller whether
++ * it is safe to return via the common in-band exit path, i.e. the
++ * in-band stage was unstalled on entry, and we are (still) running on
++ * it.
+  */
+ static __always_inline void __exit_to_user_mode(void)
+ {
++	stall_inband_nocheck();
+ 	trace_hardirqs_on_prepare();
+ 	lockdep_hardirqs_on_prepare();
+ 	user_enter_irqoff();
+ 	lockdep_hardirqs_on(CALLER_ADDR0);
++	unstall_inband_nocheck();
+ }
+ 
+-static __always_inline void exit_to_user_mode_prepare(struct pt_regs *regs)
++static __always_inline bool exit_to_user_mode_prepare(struct pt_regs *regs)
+ {
+ 	unsigned long flags;
+ 
+ 	local_daif_mask();
+ 
+-	flags = read_thread_flags();
+-	if (unlikely(flags & _TIF_WORK_MASK))
+-		do_notify_resume(regs, flags);
++	if (running_inband() && !test_inband_stall()) {
++		flags = read_thread_flags();
++		if (unlikely(flags & _TIF_WORK_MASK))
++			do_notify_resume(regs, flags);
++
++		lockdep_sys_exit();
++		/*
++		 * Caution: do_notify_resume() might have switched us
++		 * to the out-of-band stage.
++		 */
++		return running_inband();
++	}
+ 
+-	lockdep_sys_exit();
++	return false;
+ }
+ 
+ static __always_inline void exit_to_user_mode(struct pt_regs *regs)
+ {
+-	exit_to_user_mode_prepare(regs);
++	bool ret;
++
++	ret = exit_to_user_mode_prepare(regs);
+ 	mte_check_tfsr_exit();
+-	__exit_to_user_mode();
++	if (ret)
++		__exit_to_user_mode();
+ }
+ 
+ asmlinkage void noinstr asm_exit_to_user_mode(struct pt_regs *regs)
+@@ -158,6 +247,7 @@ asmlinkage void noinstr asm_exit_to_user_mode(struct pt_regs *regs)
+  */
+ static void noinstr arm64_enter_nmi(struct pt_regs *regs)
+ {
++	/* irq_pipeline: running this code oob is ok. */
+ 	regs->lockdep_hardirqs = lockdep_hardirqs_enabled();
+ 
+ 	__nmi_enter();
+@@ -233,6 +323,37 @@ DEFINE_STATIC_KEY_TRUE(sk_dynamic_irqentry_exit_cond_resched);
+ #define need_irq_preemption()	(IS_ENABLED(CONFIG_PREEMPTION))
+ #endif
+ 
++#ifdef CONFIG_IRQ_PIPELINE
++
++/*
++ * When pipelining interrupts, we have to reconcile the hardware and
++ * the virtual states. Hard irqs are off on entry while the current
++ * stage has to be unstalled: fix this up by stalling the in-band
++ * stage on entry, unstalling on exit.
++ */
++static inline void arm64_preempt_irq_enter(void)
++{
++	WARN_ON_ONCE(irq_pipeline_debug() && test_inband_stall());
++	stall_inband_nocheck();
++	trace_hardirqs_off();
++}
++
++static inline void arm64_preempt_irq_exit(void)
++{
++	trace_hardirqs_on();
++	unstall_inband_nocheck();
++}
++
++#else  /* !CONFIG_IRQ_PIPELINE */
++
++static inline void arm64_preempt_irq_enter(void)
++{ }
++
++static inline void arm64_preempt_irq_exit(void)
++{ }
++
++#endif	/* !CONFIG_IRQ_PIPELINE */
++
+ static void __sched arm64_preempt_schedule_irq(void)
+ {
+ 	if (!need_irq_preemption())
+@@ -246,6 +367,8 @@ static void __sched arm64_preempt_schedule_irq(void)
+ 	if (READ_ONCE(current_thread_info()->preempt_count) != 0)
+ 		return;
+ 
++	arm64_preempt_irq_enter();
++
+ 	/*
+ 	 * DAIF.DA are cleared at the start of IRQ/FIQ handling, and when GIC
+ 	 * priority masking is used the GIC irqchip driver will clear DAIF.IF
+@@ -253,7 +376,7 @@ static void __sched arm64_preempt_schedule_irq(void)
+ 	 * DAIF we must have handled an NMI, so skip preemption.
+ 	 */
+ 	if (system_uses_irq_prio_masking() && read_sysreg(daif))
+-		return;
++		goto out;
+ 
+ 	/*
+ 	 * Preempting a task from an IRQ means we leave copies of PSTATE
+@@ -265,20 +388,49 @@ static void __sched arm64_preempt_schedule_irq(void)
+ 	 */
+ 	if (system_capabilities_finalized())
+ 		preempt_schedule_irq();
++out:
++	arm64_preempt_irq_exit();
+ }
+ 
+-static void do_interrupt_handler(struct pt_regs *regs,
+-				 void (*handler)(struct pt_regs *))
++static void __do_interrupt_handler(struct pt_regs *regs,
++				void (*handler)(struct pt_regs *))
+ {
+-	struct pt_regs *old_regs = set_irq_regs(regs);
+-
+ 	if (on_thread_stack())
+ 		call_on_irq_stack(regs, handler);
+ 	else
+ 		handler(regs);
++}
++
++#ifdef CONFIG_IRQ_PIPELINE
++static bool do_interrupt_handler(struct pt_regs *regs,
++				void (*handler)(struct pt_regs *))
++{
++	struct pt_regs *old_regs = set_irq_regs(regs); /* need this for FIQs */
++
++	if (handler == handle_arch_irq)
++		handler = (typeof(handler))(void (*)(void))handle_irq_pipelined;
++
++	__do_interrupt_handler(regs, handler);
++
++	set_irq_regs(old_regs);
++
++	return running_inband() && !irqs_disabled();
++}
++#else
++static bool do_interrupt_handler(struct pt_regs *regs,
++				void (*handler)(struct pt_regs *))
++{
++	struct pt_regs *old_regs = set_irq_regs(regs);
++
++	irq_enter_rcu();
++	__do_interrupt_handler(regs, handler);
++	irq_exit_rcu();
+ 
+ 	set_irq_regs(old_regs);
++
++	return true;
+ }
++#endif
+ 
+ extern void (*handle_arch_irq)(struct pt_regs *);
+ extern void (*handle_arch_fiq)(struct pt_regs *);
+@@ -286,6 +438,11 @@ extern void (*handle_arch_fiq)(struct pt_regs *);
+ static void noinstr __panic_unhandled(struct pt_regs *regs, const char *vector,
+ 				      unsigned long esr)
+ {
++	/*
++	 * Dovetail: Same as __do_kernel_fault(), don't bother
++	 * restoring the in-band stage, this trap is fatal and we are
++	 * already walking on thin ice.
++	 */
+ 	arm64_enter_nmi(regs);
+ 
+ 	console_verbose();
+@@ -515,19 +672,54 @@ static __always_inline void __el1_pnmi(struct pt_regs *regs,
+ 	do_interrupt_handler(regs, handler);
+ 	arm64_exit_nmi(regs);
+ }
+-
+ static __always_inline void __el1_irq(struct pt_regs *regs,
+ 				      void (*handler)(struct pt_regs *))
+ {
+-	enter_from_kernel_mode(regs);
++	bool ret;
+ 
+-	irq_enter_rcu();
+-	do_interrupt_handler(regs, handler);
+-	irq_exit_rcu();
+-
+-	arm64_preempt_schedule_irq();
++	/*
++	 * IRQ pipeline: the interrupt entry is special in that we may
++	 * run the regular kernel entry prologue/epilogue only if the
++	 * IRQ is going to be dispatched to its handler on behalf of
++	 * the current context, i.e. only if running in-band and
++	 * unstalled. If so, we also have to reconcile the hardware
++	 * and virtual interrupt states temporarily in order to run
++	 * such prologue.
++	 */
++#ifdef CONFIG_IRQ_PIPELINE
++	if (running_inband()) {
++		regs->stalled_on_entry = test_inband_stall();
++		if (!regs->stalled_on_entry) {
++			stall_inband_nocheck();
++			_enter_from_kernel_mode(regs);
++			unstall_inband_nocheck();
++		}
++	}
++#else
++	enter_from_kernel_mode(regs);
++#endif
+ 
+-	exit_to_kernel_mode(regs);
++	ret = do_interrupt_handler(regs, handler);
++	if (ret)
++		arm64_preempt_schedule_irq();
++
++#ifdef CONFIG_IRQ_PIPELINE
++		/*
++		 * UGLY: we also have to tell the tracer that irqs are
++		 * off, since sync_current_irq_stage() did the
++		 * opposite on exit. Hopefully, at some point arm64
++		 * will convert to the generic entry code which
++		 * exhibits a less convoluted logic.
++		 */
++		if (running_inband() && !regs->stalled_on_entry) {
++			stall_inband_nocheck();
++			trace_hardirqs_off();
++			exit_to_kernel_mode(regs);
++			unstall_inband_nocheck();
++		}
++#else
++		exit_to_kernel_mode(regs);
++#endif
+ }
+ static void noinstr el1_interrupt(struct pt_regs *regs,
+ 				  void (*handler)(struct pt_regs *))
+@@ -773,16 +965,16 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
+ static void noinstr el0_interrupt(struct pt_regs *regs,
+ 				  void (*handler)(struct pt_regs *))
+ {
+-	enter_from_user_mode(regs);
++	if (handler == handle_arch_fiq ||
++		(running_inband() && !test_inband_stall()))
++		enter_from_user_mode(regs);
+ 
+ 	write_sysreg(DAIF_PROCCTX_NOIRQ, daif);
+ 
+ 	if (regs->pc & BIT(55))
+ 		arm64_apply_bp_hardening();
+ 
+-	irq_enter_rcu();
+ 	do_interrupt_handler(regs, handler);
+-	irq_exit_rcu();
+ 
+ 	exit_to_user_mode(regs);
+ }
+diff --git a/arch/arm64/kernel/irq.c b/arch/arm64/kernel/irq.c
+index 85087e2df564..ac77081fbdcf 100644
+--- a/arch/arm64/kernel/irq.c
++++ b/arch/arm64/kernel/irq.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <linux/hardirq.h>
++#include <linux/irq_pipeline.h>
+ #include <linux/init.h>
+ #include <linux/irq.h>
+ #include <linux/irqchip.h>
+@@ -32,7 +33,6 @@ DEFINE_PER_CPU(struct nmi_ctx, nmi_contexts);
+ 
+ DEFINE_PER_CPU(unsigned long *, irq_stack_ptr);
+ 
+-
+ DECLARE_PER_CPU(unsigned long *, irq_shadow_call_stack_ptr);
+ 
+ #ifdef CONFIG_SHADOW_CALL_STACK
+@@ -75,7 +75,7 @@ static void init_irq_stacks(void)
+ }
+ #endif
+ 
+-#ifndef CONFIG_PREEMPT_RT
++#ifdef CONFIG_SOFTIRQ_ON_OWN_STACK
+ static void ____do_softirq(struct pt_regs *regs)
+ {
+ 	__do_softirq();
+diff --git a/arch/arm64/kernel/irq_pipeline.c b/arch/arm64/kernel/irq_pipeline.c
+new file mode 100644
+index 000000000000..74c4746fb207
+--- /dev/null
++++ b/arch/arm64/kernel/irq_pipeline.c
+@@ -0,0 +1,24 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (C) 2018 Philippe Gerum  <rpm@xenomai.org>.
++ */
++#include <linux/irq.h>
++#include <linux/irq_pipeline.h>
++
++void arch_do_IRQ_pipelined(struct irq_desc *desc)
++{
++	struct pt_regs *regs = raw_cpu_ptr(&irq_pipeline.tick_regs);
++	struct pt_regs *old_regs = set_irq_regs(regs);
++
++	irq_enter();
++	handle_irq_desc(desc);
++	irq_exit();
++
++	set_irq_regs(old_regs);
++}
++
++void __init arch_irq_pipeline_init(void)
++{
++	/* no per-arch init. */
++}
+diff --git a/arch/arm64/kernel/process.c b/arch/arm64/kernel/process.c
+index 385fb78845d6..f09bc2515022 100644
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -493,6 +493,10 @@ static void erratum_1418040_thread_switch(struct task_struct *next)
+ 
+ static void erratum_1418040_new_exec(void)
+ {
++	/*
++	 * Dovetail: we do not compete with oob on updating this
++	 * register, so inband disable is enough.
++	 */
+ 	preempt_disable();
+ 	erratum_1418040_thread_switch(current);
+ 	preempt_enable();
+diff --git a/arch/arm64/kernel/signal.c b/arch/arm64/kernel/signal.c
+index 425b1bc17a3f..3b7f5d2e4ee1 100644
+--- a/arch/arm64/kernel/signal.c
++++ b/arch/arm64/kernel/signal.c
+@@ -11,6 +11,7 @@
+ #include <linux/errno.h>
+ #include <linux/kernel.h>
+ #include <linux/signal.h>
++#include <linux/irq_pipeline.h>
+ #include <linux/freezer.h>
+ #include <linux/stddef.h>
+ #include <linux/uaccess.h>
+@@ -1280,13 +1281,20 @@ static void do_signal(struct pt_regs *regs)
+ 
+ void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
+ {
++	WARN_ON_ONCE(irq_pipeline_debug() && running_oob());
++	WARN_ON_ONCE(irq_pipeline_debug() && test_inband_stall());
++
+ 	do {
++		stall_inband_nocheck();
++
+ 		if (thread_flags & _TIF_NEED_RESCHED) {
+ 			/* Unmask Debug and SError for the next task */
+-			local_daif_restore(DAIF_PROCCTX_NOIRQ);
++			local_daif_restore(irqs_pipelined() ? DAIF_PROCCTX :
++					DAIF_PROCCTX_NOIRQ);
+ 
+ 			schedule();
+ 		} else {
++			unstall_inband_nocheck();
+ 			local_daif_restore(DAIF_PROCCTX);
+ 
+ 			if (thread_flags & _TIF_UPROBE)
+@@ -1311,6 +1319,14 @@ void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
+ 		local_daif_mask();
+ 		thread_flags = read_thread_flags();
+ 	} while (thread_flags & _TIF_WORK_MASK);
++
++	/*
++	 * irq_pipeline: trace_hardirqs_off was in effect on entry, we
++	 * leave it this way by virtue of calling local_daif_mask()
++	 * before exiting the loop. However, we did enter unstalled
++	 * and we must restore such state on exit.
++	 */
++	unstall_inband_nocheck();
+ }
+ 
+ unsigned long __ro_after_init signal_minsigstksz;
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+index 14365ef84244..382eaabada85 100644
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -76,7 +76,7 @@ enum ipi_msg_type {
+ 	NR_IPI
+ };
+ 
+-static int ipi_irq_base __read_mostly;
++int ipi_irq_base __read_mostly;
+ static int nr_ipi __read_mostly = NR_IPI;
+ static struct irq_desc *ipi_desc[NR_IPI] __read_mostly;
+ 
+@@ -257,6 +257,7 @@ asmlinkage notrace void secondary_start_kernel(void)
+ 	complete(&cpu_running);
+ 
+ 	local_daif_restore(DAIF_PROCCTX);
++	local_irq_enable_full();
+ 
+ 	/*
+ 	 * OK, it's off to the idle thread for us
+@@ -771,6 +772,8 @@ static const char *ipi_types[NR_IPI] __tracepoint_string = {
+ 
+ static void smp_cross_call(const struct cpumask *target, unsigned int ipinr);
+ 
++static unsigned int get_ipi_count(struct irq_desc *desc, unsigned int cpu);
++
+ unsigned long irq_err_count;
+ 
+ int arch_show_interrupts(struct seq_file *p, int prec)
+@@ -781,7 +784,7 @@ int arch_show_interrupts(struct seq_file *p, int prec)
+ 		seq_printf(p, "%*s%u:%s", prec - 1, "IPI", i,
+ 			   prec >= 4 ? " " : "");
+ 		for_each_online_cpu(cpu)
+-			seq_printf(p, "%10u ", irq_desc_kstat_cpu(ipi_desc[i], cpu));
++			seq_printf(p, "%10u ", get_ipi_count(ipi_desc[i], cpu));
+ 		seq_printf(p, "      %s\n", ipi_types[i]);
+ 	}
+ 
+@@ -843,7 +846,7 @@ static void __noreturn ipi_cpu_crash_stop(unsigned int cpu, struct pt_regs *regs
+ 
+ 	atomic_dec(&waiting_for_crash_ipi);
+ 
+-	local_irq_disable();
++	local_irq_disable_full();
+ 	sdei_mask_local_cpu();
+ 
+ 	if (IS_ENABLED(CONFIG_HOTPLUG_CPU))
+@@ -857,7 +860,7 @@ static void __noreturn ipi_cpu_crash_stop(unsigned int cpu, struct pt_regs *regs
+ }
+ 
+ /*
+- * Main handler for inter-processor interrupts
++ * Main handler for inter-processor interrupts on the in-band stage.
+  */
+ static void do_handle_IPI(int ipinr)
+ {
+@@ -916,6 +919,74 @@ static void do_handle_IPI(int ipinr)
+ 		trace_ipi_exit(ipi_types[ipinr]);
+ }
+ 
++static void __smp_cross_call(const struct cpumask *target, unsigned int ipinr)
++{
++	trace_ipi_raise(target, ipi_types[ipinr]);
++	__ipi_send_mask(ipi_desc[ipinr], target);
++}
++
++#ifdef CONFIG_IRQ_PIPELINE
++
++static DEFINE_PER_CPU(unsigned long, ipi_messages);
++
++static DEFINE_PER_CPU(unsigned int [NR_IPI], ipi_counts);
++
++static irqreturn_t ipi_handler(int irq, void *data)
++{
++	unsigned long *pmsg;
++	unsigned int ipinr;
++
++	/*
++	 * Decode in-band IPIs (0..NR_IPI - 1) multiplexed over
++	 * SGI0. Out-of-band IPIs (SGI1, SGI2) have their own
++	 * individual handler.
++	 */
++	pmsg = raw_cpu_ptr(&ipi_messages);
++	while (*pmsg) {
++		ipinr = ffs(*pmsg) - 1;
++		clear_bit(ipinr, pmsg);
++		__this_cpu_inc(ipi_counts[ipinr]);
++		do_handle_IPI(ipinr);
++	}
++
++	return IRQ_HANDLED;
++}
++
++static void smp_cross_call(const struct cpumask *target, unsigned int ipinr)
++{
++	unsigned int cpu;
++
++	/* regular in-band IPI (multiplexed over SGI0). */
++	for_each_cpu(cpu, target)
++		set_bit(ipinr, &per_cpu(ipi_messages, cpu));
++
++	wmb();
++	__smp_cross_call(target, 0);
++}
++
++static unsigned int get_ipi_count(struct irq_desc *desc, unsigned int cpu)
++{
++	unsigned int irq = irq_desc_get_irq(desc);
++	return per_cpu(ipi_counts[irq - ipi_irq_base], cpu);
++}
++
++void irq_send_oob_ipi(unsigned int irq,
++		const struct cpumask *cpumask)
++{
++	unsigned int sgi = irq - ipi_irq_base;
++
++	if (WARN_ON(irq_pipeline_debug() &&
++		    (sgi < OOB_IPI_OFFSET ||
++		     sgi >= OOB_IPI_OFFSET + OOB_NR_IPI)))
++		return;
++
++	/* Out-of-band IPI (SGI1-2). */
++	__smp_cross_call(cpumask, sgi);
++}
++EXPORT_SYMBOL_GPL(irq_send_oob_ipi);
++
++#else
++
+ static irqreturn_t ipi_handler(int irq, void *data)
+ {
+ 	do_handle_IPI(irq - ipi_irq_base);
+@@ -924,10 +995,16 @@ static irqreturn_t ipi_handler(int irq, void *data)
+ 
+ static void smp_cross_call(const struct cpumask *target, unsigned int ipinr)
+ {
+-	trace_ipi_raise(target, ipi_types[ipinr]);
+-	__ipi_send_mask(ipi_desc[ipinr], target);
++	__smp_cross_call(target, ipinr);
++}
++
++static unsigned int get_ipi_count(struct irq_desc *desc, unsigned int cpu)
++{
++	return irq_desc_kstat_cpu(desc, cpu);
+ }
+ 
++#endif /* CONFIG_IRQ_PIPELINE */
++
+ static void ipi_setup(int cpu)
+ {
+ 	int i;
+@@ -954,18 +1031,25 @@ static void ipi_teardown(int cpu)
+ 
+ void __init set_smp_ipi_range(int ipi_base, int n)
+ {
+-	int i;
++	int i, inband_nr_ipi;
+ 
+ 	WARN_ON(n < NR_IPI);
+ 	nr_ipi = min(n, NR_IPI);
++	/*
++	 * irq_pipeline: the in-band stage traps SGI0 only,
++	 * over which IPI messages are mutiplexed. Other SGIs
++	 * are available for exchanging out-of-band IPIs.
++	 */
++	inband_nr_ipi = irqs_pipelined() ? 1 : nr_ipi;
+ 
+ 	for (i = 0; i < nr_ipi; i++) {
+-		int err;
+-
+-		err = request_percpu_irq(ipi_base + i, ipi_handler,
+-					 "IPI", &cpu_number);
+-		WARN_ON(err);
++		if (i < inband_nr_ipi) {
++			int err;
+ 
++			err = request_percpu_irq(ipi_base + i, ipi_handler,
++						"IPI", &cpu_number);
++			WARN_ON(err);
++		}
+ 		ipi_desc[i] = irq_to_desc(ipi_base + i);
+ 		irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
+ 	}
+diff --git a/arch/arm64/kernel/syscall.c b/arch/arm64/kernel/syscall.c
+index f090e39f69bc..39d0863c78f0 100644
+--- a/arch/arm64/kernel/syscall.c
++++ b/arch/arm64/kernel/syscall.c
+@@ -2,6 +2,7 @@
+ 
+ #include <linux/compiler.h>
+ #include <linux/context_tracking.h>
++#include <linux/irqstage.h>
+ #include <linux/errno.h>
+ #include <linux/nospec.h>
+ #include <linux/ptrace.h>
+@@ -80,6 +81,12 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
+ 	regs->orig_x0 = regs->regs[0];
+ 	regs->syscallno = scno;
+ 
++	/*
++	 * irq_pipeline: DAIF was unmasked by caller(s), we fixup the
++	 * inband stall bit accordingly.
++	 */
++	unstall_inband();
++
+ 	/*
+ 	 * BTI note:
+ 	 * The architecture does not guarantee that SPSR.BTYPE is zero
+diff --git a/arch/arm64/kernel/traps.c b/arch/arm64/kernel/traps.c
+index 610f8a1099f5..7a3d3b2c38f5 100644
+--- a/arch/arm64/kernel/traps.c
++++ b/arch/arm64/kernel/traps.c
+@@ -14,6 +14,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/uaccess.h>
+ #include <linux/hardirq.h>
++#include <linux/irqstage.h>
+ #include <linux/kdebug.h>
+ #include <linux/module.h>
+ #include <linux/kexec.h>
+@@ -203,7 +204,7 @@ static int __die(const char *str, long err, struct pt_regs *regs)
+ 	return ret;
+ }
+ 
+-static DEFINE_RAW_SPINLOCK(die_lock);
++static DEFINE_HARD_SPINLOCK(die_lock);
+ 
+ /*
+  * This function is protected against re-entrancy.
+diff --git a/arch/arm64/mm/fault.c b/arch/arm64/mm/fault.c
+index 893b9485b840..9dc193b5a6c3 100644
+--- a/arch/arm64/mm/fault.c
++++ b/arch/arm64/mm/fault.c
+@@ -283,11 +283,11 @@ static bool __kprobes is_spurious_el1_translation_fault(unsigned long addr,
+ 	    (esr & ESR_ELx_FSC_TYPE) != ESR_ELx_FSC_FAULT)
+ 		return false;
+ 
+-	local_irq_save(flags);
++	flags = hard_local_irq_save();
+ 	asm volatile("at s1e1r, %0" :: "r" (addr));
+ 	isb();
+ 	par = read_sysreg_par();
+-	local_irq_restore(flags);
++	hard_local_irq_restore(flags);
+ 
+ 	/*
+ 	 * If we now have a valid translation, treat the translation fault as
+-- 
+2.43.0
+

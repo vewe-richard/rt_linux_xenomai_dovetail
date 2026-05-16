@@ -1,0 +1,29 @@
+From d6ad3a11d63fefc3601048892c5e637bf2e3f831 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 18 May 2024 17:57:42 +0200
+Subject: [PATCH 125/175] x86: dovetail: fix unbalanced inst markers
+ (int80_emulation)
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/entry/common.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 3db9fa5dc242..3221038124f8 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -224,9 +224,9 @@ __visible noinstr void do_int80_emulation(struct pt_regs *regs)
+ 
+ 	do_syscall_32_irqs_on(regs, nr);
+ 
++done:
+ 	instrumentation_end();
+ 
+-done:
+ 	syscall_exit_to_user_mode(regs);
+ }
+ #else /* CONFIG_IA32_EMULATION */
+-- 
+2.43.0
+

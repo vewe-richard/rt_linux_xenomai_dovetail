@@ -1,0 +1,191 @@
+From d41bebb2bdf5c463af02eb8bb8e34192772e4f19 Mon Sep 17 00:00:00 2001
+From: Jan Kiszka <jan.kiszka@siemens.com>
+Date: Sat, 23 Sep 2023 11:56:16 +0200
+Subject: [PATCH 104/175] x86: dovetail: Fix Intel shadow stack support
+
+Let fpregs_lock_and_load return the saved flags of fpregs_lock and make
+sure that the shadow stack callers use that properly.
+
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+---
+ arch/x86/include/asm/fpu/api.h |  2 +-
+ arch/x86/kernel/fpu/core.c     |  8 ++++++--
+ arch/x86/kernel/shstk.c        | 31 +++++++++++++++++++------------
+ 3 files changed, 26 insertions(+), 15 deletions(-)
+
+diff --git a/arch/x86/include/asm/fpu/api.h b/arch/x86/include/asm/fpu/api.h
+index aa67abe0cb6b..2c7e3a0bb543 100644
+--- a/arch/x86/include/asm/fpu/api.h
++++ b/arch/x86/include/asm/fpu/api.h
+@@ -98,7 +98,7 @@ static inline void fpregs_unlock(unsigned long flags)
+  * being automatically saved/restored. Then FPU state can be modified safely in the
+  * registers, before unlocking with fpregs_unlock().
+  */
+-void fpregs_lock_and_load(void);
++unsigned long fpregs_lock_and_load(void);
+ 
+ #ifdef CONFIG_X86_DEBUG_FPU
+ extern void fpregs_assert_state_consistent(void);
+diff --git a/arch/x86/kernel/fpu/core.c b/arch/x86/kernel/fpu/core.c
+index dc17bb771e48..694b1cd77d91 100644
+--- a/arch/x86/kernel/fpu/core.c
++++ b/arch/x86/kernel/fpu/core.c
+@@ -821,8 +821,10 @@ void switch_fpu_return(void)
+ }
+ EXPORT_SYMBOL_GPL(switch_fpu_return);
+ 
+-void fpregs_lock_and_load(void)
++unsigned long fpregs_lock_and_load(void)
+ {
++	unsigned long flags;
++
+ 	/*
+ 	 * fpregs_lock() only disables preemption (mostly). So modifying state
+ 	 * in an interrupt could screw up some in progress fpregs operation.
+@@ -831,12 +833,14 @@ void fpregs_lock_and_load(void)
+ 	WARN_ON_ONCE(!irq_fpu_usable());
+ 	WARN_ON_ONCE(current->flags & PF_KTHREAD);
+ 
+-	fpregs_lock();
++	flags = fpregs_lock();
+ 
+ 	fpregs_assert_state_consistent();
+ 
+ 	if (test_thread_flag(TIF_NEED_FPU_LOAD))
+ 		fpregs_restore_userregs();
++
++	return flags;
+ }
+ 
+ #ifdef CONFIG_X86_DEBUG_FPU
+diff --git a/arch/x86/kernel/shstk.c b/arch/x86/kernel/shstk.c
+index 19e4db582fb6..835dfc713d86 100644
+--- a/arch/x86/kernel/shstk.c
++++ b/arch/x86/kernel/shstk.c
+@@ -158,6 +158,7 @@ static int shstk_setup(void)
+ {
+ 	struct thread_shstk *shstk = &current->thread.shstk;
+ 	unsigned long addr, size;
++	unsigned long flags;
+ 
+ 	/* Already enabled */
+ 	if (features_enabled(ARCH_SHSTK_SHSTK))
+@@ -172,10 +173,10 @@ static int shstk_setup(void)
+ 	if (IS_ERR_VALUE(addr))
+ 		return PTR_ERR((void *)addr);
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 	wrmsrl(MSR_IA32_PL3_SSP, addr + size);
+ 	wrmsrl(MSR_IA32_U_CET, CET_SHSTK_EN);
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	shstk->base = addr;
+ 	shstk->size = size;
+@@ -236,12 +237,13 @@ unsigned long shstk_alloc_thread_stack(struct task_struct *tsk, unsigned long cl
+ static unsigned long get_user_shstk_addr(void)
+ {
+ 	unsigned long long ssp;
++	unsigned long flags;
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 
+ 	rdmsrl(MSR_IA32_PL3_SSP, ssp);
+ 
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	return ssp;
+ }
+@@ -347,6 +349,7 @@ static int shstk_pop_sigframe(unsigned long *ssp)
+ int setup_signal_shadow_stack(struct ksignal *ksig)
+ {
+ 	void __user *restorer = ksig->ka.sa.sa_restorer;
++	unsigned long flags;
+ 	unsigned long ssp;
+ 	int err;
+ 
+@@ -371,15 +374,16 @@ int setup_signal_shadow_stack(struct ksignal *ksig)
+ 	if (unlikely(err))
+ 		return -EFAULT;
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 	wrmsrl(MSR_IA32_PL3_SSP, ssp);
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	return 0;
+ }
+ 
+ int restore_signal_shadow_stack(void)
+ {
++	unsigned long flags;
+ 	unsigned long ssp;
+ 	int err;
+ 
+@@ -395,9 +399,9 @@ int restore_signal_shadow_stack(void)
+ 	if (unlikely(err))
+ 		return err;
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 	wrmsrl(MSR_IA32_PL3_SSP, ssp);
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	return 0;
+ }
+@@ -442,6 +446,7 @@ void shstk_free(struct task_struct *tsk)
+ 
+ static int wrss_control(bool enable)
+ {
++	unsigned long flags;
+ 	u64 msrval;
+ 
+ 	if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
+@@ -459,7 +464,7 @@ static int wrss_control(bool enable)
+ 	if (features_enabled(ARCH_SHSTK_WRSS) == enable)
+ 		return 0;
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 	rdmsrl(MSR_IA32_U_CET, msrval);
+ 
+ 	if (enable) {
+@@ -476,13 +481,15 @@ static int wrss_control(bool enable)
+ 	wrmsrl(MSR_IA32_U_CET, msrval);
+ 
+ unlock:
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	return 0;
+ }
+ 
+ static int shstk_disable(void)
+ {
++	unsigned long flags;
++
+ 	if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
+ 		return -EOPNOTSUPP;
+ 
+@@ -490,11 +497,11 @@ static int shstk_disable(void)
+ 	if (!features_enabled(ARCH_SHSTK_SHSTK))
+ 		return 0;
+ 
+-	fpregs_lock_and_load();
++	flags = fpregs_lock_and_load();
+ 	/* Disable WRSS too when disabling shadow stack */
+ 	wrmsrl(MSR_IA32_U_CET, 0);
+ 	wrmsrl(MSR_IA32_PL3_SSP, 0);
+-	fpregs_unlock();
++	fpregs_unlock(flags);
+ 
+ 	shstk_free(current);
+ 	features_clr(ARCH_SHSTK_SHSTK | ARCH_SHSTK_WRSS);
+-- 
+2.43.0
+

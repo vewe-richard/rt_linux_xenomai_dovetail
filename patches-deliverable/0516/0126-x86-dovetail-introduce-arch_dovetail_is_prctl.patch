@@ -1,0 +1,38 @@
+From 1d082e9d57d3860a0f9bdb79c79ff6ea0d4f7a7d Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 1 Aug 2024 10:56:36 +0200
+Subject: [PATCH 126/175] x86: dovetail: introduce arch_dovetail_is_prctl()
+
+Drop arch_dovetail_is_syscall() which moved to the generic support,
+and uses arch_dovetail_is_prctl().
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/include/asm/dovetail.h | 11 +++--------
+ 1 file changed, 3 insertions(+), 8 deletions(-)
+
+diff --git a/arch/x86/include/asm/dovetail.h b/arch/x86/include/asm/dovetail.h
+index 001520262ce6..a78959af687a 100644
+--- a/arch/x86/include/asm/dovetail.h
++++ b/arch/x86/include/asm/dovetail.h
+@@ -41,14 +41,9 @@ void arch_dovetail_switch_finish(bool enter_inband)
+ 	}
+ }
+ 
+-/*
+- * 172 is __NR_prctl from unistd in compat mode, without #inclusion
+- * hell. At the end of the day, this number is written in stone to
+- * honor the ABI stability promise anyway.
+- */
+-#define arch_dovetail_is_syscall(__nr)	\
+-	(in_compat_syscall() ? (__nr) == 172 : (__nr) == __NR_prctl)
++#define arch_dovetail_is_prctl(__nr)	\
++	(in_compat_syscall() ? (__nr) == __NR_ia32_prctl : (__nr) == __NR_prctl)
+ 
+-#endif
++#endif	/* !__ASSEMBLY__ && CONFIG_DOVETAIL */
+ 
+ #endif /* _ASM_X86_DOVETAIL_H */
+-- 
+2.43.0
+

@@ -1,0 +1,104 @@
+From 7d9a6625b8c43a9b191057ba4ae5cf253b17fe06 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 24 Sep 2024 16:47:19 +0200
+Subject: [PATCH 157/175] net/page_pool: dovetail: define internal accessors to
+ cache size/refill
+
+Some drivers (e.g. mellanox/mx5 do refer to PP_ALLOC_CACHE_*
+definitions, we cannot change their definition as we'd like to support
+dynamic allocation for oob mode. Revert those changes, introducing
+dedicated helpers in replacement.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/net/page_pool/types.h | 29 +++++++++++++++++------------
+ net/core/page_pool.c          |  6 +++---
+ 2 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/include/net/page_pool/types.h b/include/net/page_pool/types.h
+index 0cf7611f1a5f..6f64a89c1776 100644
+--- a/include/net/page_pool/types.h
++++ b/include/net/page_pool/types.h
+@@ -38,24 +38,17 @@
+  * cache is already full (or partly full) then the XDP_DROP recycles
+  * would have to take a slower code path.
+  */
+-#ifdef CONFIG_PAGE_POOL_OOB
+-#define PP_ALLOC_CACHE_SIZE(__pool)	((__pool)->p.pool_size)
+-#define PP_ALLOC_CACHE_REFILL(__pool)	PP_ALLOC_CACHE_SIZE(__pool)
++#define PP_ALLOC_CACHE_SIZE	128
++#define PP_ALLOC_CACHE_REFILL	64
+ struct pp_alloc_cache {
+ 	u32 count;
++#ifdef CONFIG_PAGE_POOL_OOB
+ 	struct page **cache;
+ 	hard_spinlock_t oob_lock;
+-};
+ #else	/* !CONFIG_PAGE_POOL_OOB */
+-#define __PP_ALLOC_CACHE_SIZE	128
+-#define __PP_ALLOC_CACHE_REFILL	64
+-#define PP_ALLOC_CACHE_SIZE(__pool)	({ (void)__pool; __PP_ALLOC_CACHE_SIZE; })
+-#define PP_ALLOC_CACHE_REFILL(__pool)	({ (void)__pool; __PP_ALLOC_CACHE_REFILL; })
+-struct pp_alloc_cache {
+-	u32 count;
+-	struct page *cache[__PP_ALLOC_CACHE_SIZE];
+-};
++	struct page *cache[PP_ALLOC_CACHE_SIZE];
+ #endif	/* !CONFIG_PAGE_POOL_OOB */
++};
+ 
+ /**
+  * struct page_pool_params - page pool parameters
+@@ -216,6 +209,18 @@ static inline bool page_pool_is_oob(struct page_pool *pool)
+ 	return IS_ENABLED(CONFIG_PAGE_POOL_OOB) &&
+ 		pool->p.flags & PP_FLAG_PAGE_OOB;
+ }
++
++static inline unsigned int page_pool_cache_size(struct page_pool *pool)
++{
++	return IS_ENABLED(CONFIG_PAGE_POOL_OOB) &&
++		pool->p.flags & PP_FLAG_PAGE_OOB ? pool->p.pool_size : PP_ALLOC_CACHE_SIZE;
++}
++
++static inline unsigned int page_pool_cache_refill(struct page_pool *pool)
++{
++	return IS_ENABLED(CONFIG_PAGE_POOL_OOB) &&
++		pool->p.flags & PP_FLAG_PAGE_OOB ? pool->p.pool_size : PP_ALLOC_CACHE_REFILL;
++}
+ #else
+ static inline void page_pool_unlink_napi(struct page_pool *pool)
+ {
+diff --git a/net/core/page_pool.c b/net/core/page_pool.c
+index ce44675b263d..12fb7c69ff1a 100644
+--- a/net/core/page_pool.c
++++ b/net/core/page_pool.c
+@@ -332,7 +332,7 @@ static struct page *page_pool_refill_alloc_cache(struct page_pool *pool)
+ 			page = NULL;
+ 			break;
+ 		}
+-	} while (pool->alloc.count < PP_ALLOC_CACHE_REFILL(pool));
++	} while (pool->alloc.count < page_pool_cache_refill(pool));
+ 
+ 	/* Return last page */
+ 	if (likely(pool->alloc.count > 0)) {
+@@ -444,7 +444,7 @@ noinline
+ static struct page *__page_pool_alloc_pages_slow(struct page_pool *pool,
+ 						 gfp_t gfp)
+ {
+-	const int bulk = PP_ALLOC_CACHE_REFILL(pool);
++	const int bulk = page_pool_cache_refill(pool);
+ 	unsigned int pp_flags = pool->p.flags;
+ 	unsigned int pp_order = pool->p.order;
+ 	struct page *page;
+@@ -625,7 +625,7 @@ static bool page_pool_recycle_in_ring(struct page_pool *pool, struct page *page)
+ static bool page_pool_recycle_in_cache(struct page *page,
+ 				       struct page_pool *pool)
+ {
+-	if (unlikely(pool->alloc.count == PP_ALLOC_CACHE_SIZE(pool))) {
++	if (unlikely(pool->alloc.count == page_pool_cache_size(pool))) {
+ 		recycle_stat_inc(pool, cache_full);
+ 		return false;
+ 	}
+-- 
+2.43.0
+

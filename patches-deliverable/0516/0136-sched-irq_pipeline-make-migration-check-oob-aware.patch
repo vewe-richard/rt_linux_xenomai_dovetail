@@ -1,0 +1,27 @@
+From 4ff7d64a00cf949a8da507e07cf4247f35ff88d2 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Thu, 22 Feb 2024 14:45:57 +0100
+Subject: [PATCH 136/175] sched: irq_pipeline: make migration check oob-aware
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ kernel/sched/core.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index f0524e780a94..cebcec00203b 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -10317,6 +10317,9 @@ void __cant_migrate(const char *file, int line)
+ {
+ 	static unsigned long prev_jiffy;
+ 
++	if (irqs_pipelined() && (running_oob() || hard_irqs_disabled()))
++		return;
++
+ 	if (irqs_disabled())
+ 		return;
+ 
+-- 
+2.43.0
+

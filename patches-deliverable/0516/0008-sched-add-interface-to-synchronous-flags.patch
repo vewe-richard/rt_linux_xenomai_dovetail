@@ -1,0 +1,88 @@
+From abe61ef621d5f1f9954526ae65b560fe3360ac1b Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 28 Jul 2016 19:29:24 +0200
+Subject: [PATCH 008/175] sched: add interface to synchronous flags
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/linux/thread_info.h | 64 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+
+diff --git a/include/linux/thread_info.h b/include/linux/thread_info.h
+index 9ea0b28068f4..38335d5892d7 100644
+--- a/include/linux/thread_info.h
++++ b/include/linux/thread_info.h
+@@ -260,6 +260,70 @@ void arch_task_cache_init(void); /* for CONFIG_SH */
+ void arch_release_task_struct(struct task_struct *tsk);
+ int arch_dup_task_struct(struct task_struct *dst,
+ 				struct task_struct *src);
++#ifdef ti_local_flags
++/*
++ * If the arch defines a set of per-thread synchronous flags, provide
++ * generic accessors to them.
++ */
++static inline void set_ti_local_flags(struct thread_info *ti, unsigned int mask)
++{
++	ti_local_flags(ti) |= mask;
++}
++
++static inline void set_thread_local_flags(unsigned int mask)
++{
++	set_ti_local_flags(current_thread_info(), mask);
++}
++
++static inline
++int test_and_set_ti_local_flags(struct thread_info *ti, unsigned int mask)
++{
++	int old = ti_local_flags(ti) & mask;
++	ti_local_flags(ti) |= mask;
++	return old != 0;
++}
++
++static inline int test_and_set_thread_local_flags(unsigned int mask)
++{
++	return test_and_set_ti_local_flags(current_thread_info(), mask);
++}
++
++static inline
++void clear_ti_local_flags(struct thread_info *ti, unsigned int mask)
++{
++	ti_local_flags(ti) &= ~mask;
++}
++
++static inline
++int test_and_clear_ti_local_flags(struct thread_info *ti, unsigned int mask)
++{
++	int old = ti_local_flags(ti) & mask;
++	ti_local_flags(ti) &= ~mask;
++	return old != 0;
++}
++
++static inline int test_and_clear_thread_local_flags(unsigned int mask)
++{
++	return test_and_clear_ti_local_flags(current_thread_info(), mask);
++}
++
++static inline void clear_thread_local_flags(unsigned int mask)
++{
++	clear_ti_local_flags(current_thread_info(), mask);
++}
++
++static inline
++bool test_ti_local_flags(struct thread_info *ti, unsigned int mask)
++{
++	return (ti_local_flags(ti) & mask) != 0;
++}
++
++static inline bool test_thread_local_flags(unsigned int mask)
++{
++	return test_ti_local_flags(current_thread_info(), mask);
++}
++
++#endif	/* ti_local_flags */
+ 
+ #endif	/* __KERNEL__ */
+ 
+-- 
+2.43.0
+

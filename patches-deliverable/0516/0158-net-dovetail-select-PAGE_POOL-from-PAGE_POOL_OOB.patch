@@ -1,0 +1,25 @@
+From 32d696d17587512c0a5f79a46bd6d3ac2e9fc58e Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 28 Sep 2024 18:36:24 +0200
+Subject: [PATCH 158/175] net: dovetail: select PAGE_POOL from PAGE_POOL_OOB
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ net/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/net/Kconfig b/net/Kconfig
+index 22309a4d0742..7e9eb8a78df8 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -476,6 +476,7 @@ config PAGE_POOL
+ 
+ config PAGE_POOL_OOB
+ 	def_bool n
++	select PAGE_POOL
+ 
+ config PAGE_POOL_STATS
+ 	default n
+-- 
+2.43.0
+

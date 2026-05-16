@@ -1,0 +1,51 @@
+From 6e9ae742ccaeb627ccc642f8676fe780293ecb60 Mon Sep 17 00:00:00 2001
+From: leo <vtk-powerlab@yandex.ru>
+Date: Tue, 24 Dec 2019 19:14:08 +0100
+Subject: [PATCH 039/175] pinctrl/sunxi: irq_pipeline: enable pipelined
+ interrupt control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/pinctrl/sunxi/pinctrl-sunxi.c | 5 +++--
+ drivers/pinctrl/sunxi/pinctrl-sunxi.h | 2 +-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/pinctrl/sunxi/pinctrl-sunxi.c b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+index fc11c3d55fa8..c077732295f1 100644
+--- a/drivers/pinctrl/sunxi/pinctrl-sunxi.c
++++ b/drivers/pinctrl/sunxi/pinctrl-sunxi.c
+@@ -1164,7 +1164,7 @@ static struct irq_chip sunxi_pinctrl_edge_irq_chip = {
+ 	.irq_release_resources = sunxi_pinctrl_irq_release_resources,
+ 	.irq_set_type	= sunxi_pinctrl_irq_set_type,
+ 	.irq_set_wake	= sunxi_pinctrl_irq_set_wake,
+-	.flags		= IRQCHIP_MASK_ON_SUSPEND,
++	.flags		= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static struct irq_chip sunxi_pinctrl_level_irq_chip = {
+@@ -1182,7 +1182,8 @@ static struct irq_chip sunxi_pinctrl_level_irq_chip = {
+ 	.irq_set_wake	= sunxi_pinctrl_irq_set_wake,
+ 	.flags		= IRQCHIP_EOI_THREADED |
+ 			  IRQCHIP_MASK_ON_SUSPEND |
+-			  IRQCHIP_EOI_IF_HANDLED,
++			  IRQCHIP_EOI_IF_HANDLED |
++			  IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static int sunxi_pinctrl_irq_of_xlate(struct irq_domain *d,
+diff --git a/drivers/pinctrl/sunxi/pinctrl-sunxi.h b/drivers/pinctrl/sunxi/pinctrl-sunxi.h
+index a87a2f944d60..54f18a970085 100644
+--- a/drivers/pinctrl/sunxi/pinctrl-sunxi.h
++++ b/drivers/pinctrl/sunxi/pinctrl-sunxi.h
+@@ -172,7 +172,7 @@ struct sunxi_pinctrl {
+ 	unsigned			ngroups;
+ 	int				*irq;
+ 	unsigned			*irq_array;
+-	raw_spinlock_t			lock;
++	hard_spinlock_t			lock;
+ 	struct pinctrl_dev		*pctl_dev;
+ 	unsigned long			variant;
+ 	u32				bank_mem_size;
+-- 
+2.43.0
+

@@ -1,0 +1,87 @@
+From d959ce5fcc43f0c688df4f5f7c978771cf754222 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Fri, 1 Mar 2024 11:27:11 +0100
+Subject: [PATCH 149/175] net: dovetail: drop useless indirection via
+ oob_netdev_state
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/linux/netdevice.h   |  6 +++---
+ include/net/net_namespace.h |  2 +-
+ include/net/netoob.h        | 13 -------------
+ 3 files changed, 4 insertions(+), 17 deletions(-)
+ delete mode 100644 include/net/netoob.h
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index 239ab4d9db21..f1032c40337a 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -40,7 +40,6 @@
+ #include <net/dcbnl.h>
+ #endif
+ #include <net/netprio_cgroup.h>
+-#include <net/netoob.h>
+ 
+ #include <linux/netdev_features.h>
+ #include <linux/neighbour.h>
+@@ -50,6 +49,7 @@
+ #include <uapi/linux/netdev.h>
+ #include <linux/hashtable.h>
+ #include <linux/rbtree.h>
++#include <dovetail/netdevice.h>
+ #include <net/net_trackers.h>
+ #include <net/net_debug.h>
+ #include <net/dropreason-core.h>
+@@ -1877,7 +1877,7 @@ enum netdev_stat_type {
+  *	@tlsdev_ops:	Transport Layer Security offload operations
+  *	@header_ops:	Includes callbacks for creating,parsing,caching,etc
+  *			of Layer 2 headers.
+- *	@net_oob_context:	Out-of-band networking context (oob stage diversion)
++ *	@oob_state:	Out-of-band networking state (oob stage diversion)
+  *
+  *	@flags:		Interface flags (a la BSD)
+  *	@xdp_features:	XDP capability supported by the device
+@@ -2188,7 +2188,7 @@ struct net_device {
+ #endif
+ 
+ #ifdef CONFIG_NET_OOB
+-	struct oob_netdev_context  oob_context;
++	struct oob_netdev_state  oob_state;
+ #endif
+ 
+ 	const struct header_ops *header_ops;
+diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
+index f565c91737f7..aa5febbbf8a2 100644
+--- a/include/net/net_namespace.h
++++ b/include/net/net_namespace.h
+@@ -38,7 +38,7 @@
+ #include <net/netns/bpf.h>
+ #include <net/netns/mctp.h>
+ #include <net/net_trackers.h>
+-#include <net/netoob.h>
++#include <dovetail/net.h>
+ #include <linux/ns_common.h>
+ #include <linux/idr.h>
+ #include <linux/skbuff.h>
+diff --git a/include/net/netoob.h b/include/net/netoob.h
+deleted file mode 100644
+index 02ec893d7d7c..000000000000
+--- a/include/net/netoob.h
++++ /dev/null
+@@ -1,13 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+-#ifndef _NET_OOBNET_H
+-#define _NET_OOBNET_H
+-
+-#include <dovetail/net.h>
+-#include <dovetail/netdevice.h>
+-
+-/* Netdevice context extension for oob handling. */
+-struct oob_netdev_context {
+-	struct oob_netdev_state dev_state;
+-};
+-
+-#endif /* !_NET_OOBNET_H */
+-- 
+2.43.0
+

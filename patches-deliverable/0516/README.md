@@ -1,0 +1,72 @@
+# Dovetail + Xenomai Patches for QCOM 6.6.119 (2026-05-16)
+
+## Baseline
+
+| Item | Value |
+|------|-------|
+| Base repo | `git.codelinaro.org/clo/la/kernel/qcom` |
+| Base tag | `kernel.qclinux.1.0.r1-rel` |
+| Base commit | QCOM QLI 1.8 — Linux 6.6.119 |
+| Target branch | `dovetail-integration` |
+| Patches count | 175 |
+
+## Patch Breakdown
+
+| Range | Count | Source |
+|-------|-------|--------|
+| 0001–0171 | 171 | Dovetail v6.6.y-dovetail (linux-dovetail) |
+| 0172 | 1 | x86_64 build fix (irqflags.h, vector.c) |
+| 0173 | 1 | QCOM BSP syntax fix (drm_of.h) |
+| 0174 | 1 | Xenomai Cobalt integrate — x86_64 (prepare-kernel.sh) |
+| 0175 | 1 | Xenomai Cobalt integrate — ARM64 + qcom_scm_trace.h fix |
+
+## Manual Fixes Applied (included in patches above)
+
+| Patch | File | Issue | Fix |
+|-------|------|-------|-----|
+| 0172 | arch/x86/include/asm/irqflags.h | Dovetail + QCOM irqflags conflict | Replaced with dovetail version |
+| 0172 | arch/x86/kernel/apic/vector.c | DECLARE_X86_CLEANUP_WORKER API change | Use queue_cleanup_work() macro |
+| 0173 | include/drm/drm_of.h | `;` instead of `)` in function declaration | Fix syntax |
+| — | drivers/pci/pci.h | static function not inline → -Werror | Add `inline` keyword |
+| 0175 | drivers/firmware/qcom_scm_trace.h | TRACE_INCLUDE_PATH=. resolves to wrong dir | Changed to `../../drivers/firmware` |
+
+## How to Apply
+
+```bash
+cd qcom-kernel                    # QCOM 6.6.119 tree
+git checkout kernel.qclinux.1.0.r1-rel
+git checkout -b dovetail-integration
+
+for p in patches-deliverable/0516/*.patch; do
+  git am --3way "$p" || { echo "CONFLICT: $p"; break; }
+done
+```
+
+## After Applying Patches
+
+1. **Run prepare-kernel.sh** (fixes symlinks for your local paths):
+   ```bash
+   ./scripts/prepare-kernel.sh --linux=. --arch=arm64 --verbose
+   ```
+
+2. **Configure and build**:
+   ```bash
+   make ARCH=arm64 defconfig
+   ./scripts/config --enable CONFIG_IRQ_PIPELINE
+   ./scripts/config --enable CONFIG_DOVETAIL
+   ./scripts/config --enable CONFIG_XENOMAI
+   make ARCH=arm64 olddefconfig
+   make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+   ```
+
+## Verification
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| x86_64 QEMU | Verified | latency 3350ns idle, demo apps pass |
+| ARM64 cross-compile | Verified | Compiles with dovetail/cobalt enabled |
+| ARM64 RB3 Gen2 | Pending | Needs board access |
+
+## Previous Version
+
+`patches-deliverable/0515/` — 174 patches, x86_64 only. This version adds ARM64 support.

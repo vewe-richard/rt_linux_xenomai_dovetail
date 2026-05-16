@@ -1,0 +1,192 @@
+From d1ffc078e866eb65594d83692be921a8ad8bd119 Mon Sep 17 00:00:00 2001
+From: vewe-richard <jiang.j.qian@qq.com>
+Date: Sat, 16 May 2026 15:29:30 +0800
+Subject: [PATCH 175/175] ARM64: add xenomai cobalt via prepare-kernel.sh and
+ fix qcom_scm_trace.h
+
+- Run prepare-kernel.sh --arch=arm64 to create ARM64 xenomai symlinks
+- Fix TRACE_INCLUDE_PATH in qcom_scm_trace.h for arm64 cross-compile
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/arm64/Makefile                                       | 3 +++
+ arch/arm64/xenomai/Kconfig                                | 1 +
+ arch/arm64/xenomai/Makefile                               | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/calibration.h      | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/features.h         | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/fptest.h           | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/machine.h          | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/syscall.h          | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/thread.h           | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/uapi/abirevision.h | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/uapi/arith.h       | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/uapi/features.h    | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/uapi/fptest.h      | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/uapi/syscall.h     | 1 +
+ arch/arm64/xenomai/include/asm/xenomai/wrappers.h         | 1 +
+ arch/arm64/xenomai/machine.c                              | 1 +
+ drivers/firmware/qcom_scm_trace.h                         | 2 +-
+ 17 files changed, 19 insertions(+), 1 deletion(-)
+ create mode 120000 arch/arm64/xenomai/Kconfig
+ create mode 120000 arch/arm64/xenomai/Makefile
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/calibration.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/features.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/fptest.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/machine.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/syscall.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/thread.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/uapi/abirevision.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/uapi/arith.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/uapi/features.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/uapi/fptest.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/uapi/syscall.h
+ create mode 120000 arch/arm64/xenomai/include/asm/xenomai/wrappers.h
+ create mode 120000 arch/arm64/xenomai/machine.c
+
+diff --git a/arch/arm64/Makefile b/arch/arm64/Makefile
+index 11782860717f..7cc9b8606efd 100644
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -217,3 +217,6 @@ define archhelp
+   echo  '                  (distribution) /sbin/installkernel or'
+   echo  '                  install to $$(INSTALL_PATH) and run lilo'
+ endef
++
++KBUILD_CFLAGS += -I$(srctree)/arch/$(SRCARCH)/xenomai/include -I$(srctree)/include/xenomai
++core-$(CONFIG_XENOMAI) += arch/arm64/xenomai/
+diff --git a/arch/arm64/xenomai/Kconfig b/arch/arm64/xenomai/Kconfig
+new file mode 120000
+index 000000000000..69aea6704a13
+--- /dev/null
++++ b/arch/arm64/xenomai/Kconfig
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/Kconfig
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/Makefile b/arch/arm64/xenomai/Makefile
+new file mode 120000
+index 000000000000..d68d8179af09
+--- /dev/null
++++ b/arch/arm64/xenomai/Makefile
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/Makefile
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/calibration.h b/arch/arm64/xenomai/include/asm/xenomai/calibration.h
+new file mode 120000
+index 000000000000..b613c37c7ca8
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/calibration.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/calibration.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/features.h b/arch/arm64/xenomai/include/asm/xenomai/features.h
+new file mode 120000
+index 000000000000..22ce133a8ccf
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/features.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/features.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/fptest.h b/arch/arm64/xenomai/include/asm/xenomai/fptest.h
+new file mode 120000
+index 000000000000..cc6d8d851fb9
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/fptest.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/fptest.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/machine.h b/arch/arm64/xenomai/include/asm/xenomai/machine.h
+new file mode 120000
+index 000000000000..b1e684cb6b77
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/machine.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/machine.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/syscall.h b/arch/arm64/xenomai/include/asm/xenomai/syscall.h
+new file mode 120000
+index 000000000000..aa04bad01ef4
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/syscall.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/syscall.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/thread.h b/arch/arm64/xenomai/include/asm/xenomai/thread.h
+new file mode 120000
+index 000000000000..04af12595ab4
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/thread.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/thread.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/uapi/abirevision.h b/arch/arm64/xenomai/include/asm/xenomai/uapi/abirevision.h
+new file mode 120000
+index 000000000000..f8ce824e9f08
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/uapi/abirevision.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/uapi/abirevision.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/uapi/arith.h b/arch/arm64/xenomai/include/asm/xenomai/uapi/arith.h
+new file mode 120000
+index 000000000000..5d4a6ca1fea2
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/uapi/arith.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/uapi/arith.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/uapi/features.h b/arch/arm64/xenomai/include/asm/xenomai/uapi/features.h
+new file mode 120000
+index 000000000000..3419656c39e8
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/uapi/features.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/uapi/features.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/uapi/fptest.h b/arch/arm64/xenomai/include/asm/xenomai/uapi/fptest.h
+new file mode 120000
+index 000000000000..347db7605739
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/uapi/fptest.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/uapi/fptest.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/uapi/syscall.h b/arch/arm64/xenomai/include/asm/xenomai/uapi/syscall.h
+new file mode 120000
+index 000000000000..2ffd0b2ab3f4
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/uapi/syscall.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/uapi/syscall.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/include/asm/xenomai/wrappers.h b/arch/arm64/xenomai/include/asm/xenomai/wrappers.h
+new file mode 120000
+index 000000000000..642493d6488b
+--- /dev/null
++++ b/arch/arm64/xenomai/include/asm/xenomai/wrappers.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/include/asm/xenomai/wrappers.h
+\ No newline at end of file
+diff --git a/arch/arm64/xenomai/machine.c b/arch/arm64/xenomai/machine.c
+new file mode 120000
+index 000000000000..1814b68f90ed
+--- /dev/null
++++ b/arch/arm64/xenomai/machine.c
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/arch/arm64/machine.c
+\ No newline at end of file
+diff --git a/drivers/firmware/qcom_scm_trace.h b/drivers/firmware/qcom_scm_trace.h
+index e3c6cf951ad1..5c31fe3eaba9 100644
+--- a/drivers/firmware/qcom_scm_trace.h
++++ b/drivers/firmware/qcom_scm_trace.h
+@@ -151,7 +151,7 @@ TRACE_EVENT(scm_smc_done,
+ #endif /* _TRACE_SCM_SMC_INTERFACE_H */
+ 
+ #undef TRACE_INCLUDE_PATH
+-#define TRACE_INCLUDE_PATH .
++#define TRACE_INCLUDE_PATH ../../drivers/firmware
+ #define TRACE_INCLUDE_FILE qcom_scm_trace
+ 
+ #include <trace/define_trace.h>
+-- 
+2.43.0
+

@@ -1,0 +1,189 @@
+From fa1263953b8d9c4e1834bf940119132a3eb63857 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 13 Sep 2018 19:11:56 +0200
+Subject: [PATCH 071/175] arm64: dovetail: add core support
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/arm64/Kconfig                   |  3 +++
+ arch/arm64/include/asm/dovetail.h    |  9 +++++++++
+ arch/arm64/include/asm/thread_info.h |  6 ++++++
+ arch/arm64/include/asm/uaccess.h     |  8 ++++----
+ arch/arm64/kernel/entry-common.c     | 26 +++++++++++++++++++++++++-
+ 5 files changed, 47 insertions(+), 5 deletions(-)
+ create mode 100644 arch/arm64/include/asm/dovetail.h
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 9cc78ae49e3e..574febf9b882 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -215,6 +215,7 @@ config ARM64
+ 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
+ 	select HAVE_IOREMAP_PROT
+ 	select HAVE_IRQ_PIPELINE
++	select HAVE_DOVETAIL
+ 	select HAVE_IRQ_TIME_ACCOUNTING
+ 	select HAVE_KVM
+ 	select HAVE_MOD_ARCH_SPECIFIC
+@@ -1516,6 +1517,8 @@ config HW_PERF_EVENTS
+ config CC_HAVE_SHADOW_CALL_STACK
+ 	def_bool $(cc-option, -fsanitize=shadow-call-stack -ffixed-x18)
+ 
++source "kernel/Kconfig.dovetail"
++
+ config PARAVIRT
+ 	bool "Enable paravirtualization code"
+ 	help
+diff --git a/arch/arm64/include/asm/dovetail.h b/arch/arm64/include/asm/dovetail.h
+new file mode 100644
+index 000000000000..8c0af9bbf972
+--- /dev/null
++++ b/arch/arm64/include/asm/dovetail.h
+@@ -0,0 +1,9 @@
++/*
++ * SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (C) 2018 Philippe Gerum  <rpm@xenomai.org>.
++ */
++#ifndef _ASM_ARM64_DOVETAIL_H
++#define _ASM_ARM64_DOVETAIL_H
++
++#endif /* _ASM_ARM64_DOVETAIL_H */
+diff --git a/arch/arm64/include/asm/thread_info.h b/arch/arm64/include/asm/thread_info.h
+index 48e528c6fea5..13b8c36253b6 100644
+--- a/arch/arm64/include/asm/thread_info.h
++++ b/arch/arm64/include/asm/thread_info.h
+@@ -14,6 +14,7 @@
+ 
+ struct task_struct;
+ 
++#include <dovetail/thread_info.h>
+ #include <asm/memory.h>
+ #include <asm/stack_pointer.h>
+ #include <asm/types.h>
+@@ -44,6 +45,7 @@ struct thread_info {
+ 	void			*scs_sp;
+ #endif
+ 	u32			cpu;
++	struct oob_thread_state	oob_state;
+ };
+ 
+ #define thread_saved_pc(tsk)	\
+@@ -84,6 +86,7 @@ void arch_setup_new_exec(void);
+ #define TIF_TAGGED_ADDR		26	/* Allow tagged user addresses */
+ #define TIF_SME			27	/* SME in use */
+ #define TIF_SME_VL_INHERIT	28	/* Inherit SME vl_onexec across exec */
++#define TIF_MAYDAY		29	/* Emergency trap pending */
+ 
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+@@ -101,6 +104,7 @@ void arch_setup_new_exec(void);
+ #define _TIF_MTE_ASYNC_FAULT	(1 << TIF_MTE_ASYNC_FAULT)
+ #define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
+ #define _TIF_RETUSER		(1 << TIF_RETUSER)
++#define _TIF_MAYDAY		(1 << TIF_MAYDAY)
+ 
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+@@ -130,5 +134,7 @@ void arch_setup_new_exec(void);
+  * Local (synchronous) thread flags.
+  */
+ #define _TLF_OOB		0x0001
++#define _TLF_DOVETAIL		0x0002
++#define _TLF_OFFSTAGE		0x0004
+ 
+ #endif /* __ASM_THREAD_INFO_H */
+diff --git a/arch/arm64/include/asm/uaccess.h b/arch/arm64/include/asm/uaccess.h
+index 14be5000c5a0..93f4b82a492d 100644
+--- a/arch/arm64/include/asm/uaccess.h
++++ b/arch/arm64/include/asm/uaccess.h
+@@ -60,7 +60,7 @@ static inline void __uaccess_ttbr0_disable(void)
+ {
+ 	unsigned long flags, ttbr;
+ 
+-	local_irq_save(flags);
++	flags = hard_local_irq_save();
+ 	ttbr = read_sysreg(ttbr1_el1);
+ 	ttbr &= ~TTBR_ASID_MASK;
+ 	/* reserved_pg_dir placed before swapper_pg_dir */
+@@ -68,7 +68,7 @@ static inline void __uaccess_ttbr0_disable(void)
+ 	/* Set reserved ASID */
+ 	write_sysreg(ttbr, ttbr1_el1);
+ 	isb();
+-	local_irq_restore(flags);
++	hard_local_irq_restore(flags);
+ }
+ 
+ static inline void __uaccess_ttbr0_enable(void)
+@@ -80,7 +80,7 @@ static inline void __uaccess_ttbr0_enable(void)
+ 	 * variable and the MSR. A context switch could trigger an ASID
+ 	 * roll-over and an update of 'ttbr0'.
+ 	 */
+-	local_irq_save(flags);
++	flags = hard_local_irq_save();
+ 	ttbr0 = READ_ONCE(current_thread_info()->ttbr0);
+ 
+ 	/* Restore active ASID */
+@@ -92,7 +92,7 @@ static inline void __uaccess_ttbr0_enable(void)
+ 	/* Restore user page table */
+ 	write_sysreg(ttbr0, ttbr0_el1);
+ 	isb();
+-	local_irq_restore(flags);
++	hard_local_irq_restore(flags);
+ }
+ 
+ static inline bool uaccess_ttbr0_disable(void)
+diff --git a/arch/arm64/kernel/entry-common.c b/arch/arm64/kernel/entry-common.c
+index 7017e7ed12b1..5af12efb43da 100644
+--- a/arch/arm64/kernel/entry-common.c
++++ b/arch/arm64/kernel/entry-common.c
+@@ -392,6 +392,29 @@ static void __sched arm64_preempt_schedule_irq(void)
+ 	arm64_preempt_irq_exit();
+ }
+ 
++#ifdef CONFIG_DOVETAIL
++/*
++ * When Dovetail is enabled, the companion core may switch contexts
++ * over the irq stack, therefore subsequent interrupts might be taken
++ * over sibling stack contexts. So we need a not so subtle way of
++ * figuring out whether the irq stack was actually exited, which
++ * cannot depend on the current task pointer. Instead, we track the
++ * interrupt nesting depth for a CPU in irq_nesting.
++ */
++DEFINE_PER_CPU(int, irq_nesting);
++
++static void __do_interrupt_handler(struct pt_regs *regs,
++				void (*handler)(struct pt_regs *))
++{
++	if (this_cpu_inc_return(irq_nesting) == 1)
++		call_on_irq_stack(regs, handler);
++	else
++		handler(regs);
++
++	this_cpu_dec(irq_nesting);
++}
++
++#else
+ static void __do_interrupt_handler(struct pt_regs *regs,
+ 				void (*handler)(struct pt_regs *))
+ {
+@@ -400,6 +423,7 @@ static void __do_interrupt_handler(struct pt_regs *regs,
+ 	else
+ 		handler(regs);
+ }
++#endif	/* !CONFIG_DOVETAIL */
+ 
+ #ifdef CONFIG_IRQ_PIPELINE
+ static bool do_interrupt_handler(struct pt_regs *regs,
+@@ -430,7 +454,7 @@ static bool do_interrupt_handler(struct pt_regs *regs,
+ 
+ 	return true;
+ }
+-#endif
++#endif	/* !CONFIG_IRQ_PIPELINE */
+ 
+ extern void (*handle_arch_irq)(struct pt_regs *);
+ extern void (*handle_arch_fiq)(struct pt_regs *);
+-- 
+2.43.0
+
