@@ -1,4 +1,8 @@
 tmp/
+linux-dovetail/
+meta-qcom-realtime/
+qcom/
+xenomai/
 *~
 *.o
 *.ko
