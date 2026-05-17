@@ -1,0 +1,57 @@
+From 9dce87de1a7240ab5355da49ec0ba6dfbf735068 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Mon, 6 Nov 2023 10:39:48 +0100
+Subject: [PATCH 139/175] net: dovetail: run oob bind+connect calls last
+
+Out-of-band handlers for bind() and connect() may want to reuse some
+information determined by the in-band handlers, so let's invert the
+calling sequence.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ net/socket.c | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/net/socket.c b/net/socket.c
+index 4f1b1f2975e0..28752faced82 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -1968,13 +1968,13 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+ 			err = security_socket_bind(sock,
+ 						   (struct sockaddr *)&address,
+ 						   addrlen);
+-			if (sock_oob_capable(sock) && !err)
+-				err = sock_oob_bind(sock, (struct sockaddr *)
+-						&address, addrlen);
+ 			if (!err)
+ 				err = READ_ONCE(sock->ops)->bind(sock,
+ 						      (struct sockaddr *)
+ 						      &address, addrlen);
++			if (!err && sock_oob_capable(sock))
++				err = sock_oob_bind(sock, (struct sockaddr *)
++						&address, addrlen);
+ 		}
+ 		fput_light(sock->file, fput_needed);
+ 	}
+@@ -2173,15 +2173,14 @@ int __sys_connect_file(struct file *file, struct sockaddr_storage *address,
+ 	if (err)
+ 		goto out;
+ 
+-	if (sock_oob_capable(sock)) {
++	err = READ_ONCE(sock->ops)->connect(sock, (struct sockaddr *)address,
++				addrlen, sock->file->f_flags | file_flags);
++	if (!err && sock_oob_capable(sock)) {
+ 		err = sock_oob_connect(sock, (struct sockaddr *)address,
+ 				addrlen);
+ 		if (err)
+ 			goto out;
+ 	}
+-
+-	err = READ_ONCE(sock->ops)->connect(sock, (struct sockaddr *)address,
+-				addrlen, sock->file->f_flags | file_flags);
+ out:
+ 	return err;
+ }
+-- 
+2.43.0
+

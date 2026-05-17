@@ -1,0 +1,122 @@
+From c8b09121fe7d8f543f8a328bbb74c51ee97c05ee Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <philippe.gerum@exail.com>
+Date: Mon, 23 Oct 2023 11:48:14 +0200
+Subject: [PATCH 114/175] net: dovetail: introduce net struct extension
+
+This is needed to store the per-net information related to oob
+activity.
+
+Signed-off-by: Philippe Gerum <philippe.gerum@exail.com>
+---
+ include/dovetail/net.h       | 15 +++++++++++++++
+ include/dovetail/netdevice.h |  5 ++---
+ include/net/net_namespace.h  |  3 +++
+ include/net/netoob.h         |  2 ++
+ net/core/net_namespace.c     |  4 ++++
+ 5 files changed, 26 insertions(+), 3 deletions(-)
+ create mode 100644 include/dovetail/net.h
+
+diff --git a/include/dovetail/net.h b/include/dovetail/net.h
+new file mode 100644
+index 000000000000..163fbccd862d
+--- /dev/null
++++ b/include/dovetail/net.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _DOVETAIL_NET_H
++#define _DOVETAIL_NET_H
++
++/*
++ * Placeholder for a network descriptor extension otherwise defined by
++ * the out-of-band network stack.
++ */
++struct oob_net_state {
++};
++
++static inline void net_init_oob_state(struct oob_net_state *nets) { }
++static inline void net_cleanup_oob_state(struct oob_net_state *nets) { }
++
++#endif /* !_DOVETAIL_NET_H */
+diff --git a/include/dovetail/netdevice.h b/include/dovetail/netdevice.h
+index 06e8205e25d5..5bd975ccd5b3 100644
+--- a/include/dovetail/netdevice.h
++++ b/include/dovetail/netdevice.h
+@@ -3,10 +3,9 @@
+ #define _DOVETAIL_NETDEVICE_H
+ 
+ /*
+- * Placeholder for per-device state information defined by the
+- * out-of-band network stack.
++ * Placeholder for per-device state information otherwise defined by
++ * the out-of-band network stack.
+  */
+-
+ struct oob_netdev_state {
+ };
+ 
+diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
+index 5ddcadee62b7..f565c91737f7 100644
+--- a/include/net/net_namespace.h
++++ b/include/net/net_namespace.h
+@@ -38,6 +38,7 @@
+ #include <net/netns/bpf.h>
+ #include <net/netns/mctp.h>
+ #include <net/net_trackers.h>
++#include <net/netoob.h>
+ #include <linux/ns_common.h>
+ #include <linux/idr.h>
+ #include <linux/skbuff.h>
+@@ -169,6 +170,8 @@ struct net {
+ 
+ 	u64			net_cookie; /* written once */
+ 
++	struct oob_net_state	oob;
++
+ #if IS_ENABLED(CONFIG_IP_VS)
+ 	struct netns_ipvs	*ipvs;
+ #endif
+diff --git a/include/net/netoob.h b/include/net/netoob.h
+index 907376ad40ed..55fd2357afb2 100644
+--- a/include/net/netoob.h
++++ b/include/net/netoob.h
+@@ -2,6 +2,7 @@
+ #ifndef _NET_OOBNET_H
+ #define _NET_OOBNET_H
+ 
++#include <dovetail/net.h>
+ #include <dovetail/netdevice.h>
+ 
+ /* Device supports direct out-of-band operations (RX & TX) */
+@@ -9,6 +10,7 @@
+ /* Device is an out-of-band port */
+ #define IFF_OOB_PORT		BIT(1)
+ 
++/* Netdevice context extension for oob handling. */
+ struct oob_netdev_context {
+ 	int flags;
+ 	struct oob_netdev_state dev_state;
+diff --git a/net/core/net_namespace.c b/net/core/net_namespace.c
+index 20829e0c36cd..0a2071a15f98 100644
+--- a/net/core/net_namespace.c
++++ b/net/core/net_namespace.c
+@@ -338,6 +338,8 @@ static __net_init int setup_net(struct net *net, struct user_namespace *user_ns)
+ 	idr_init(&net->netns_ids);
+ 	spin_lock_init(&net->nsid_lock);
+ 	mutex_init(&net->ipv4.ra_mutex);
++	/* Dovetail: set up the oob-specific state. */
++	net_init_oob_state(&net->oob);
+ 
+ 	list_for_each_entry(ops, &pernet_list, list) {
+ 		error = ops_init(ops, net);
+@@ -625,6 +627,8 @@ static void cleanup_net(struct work_struct *work)
+ 	llist_for_each_entry(net, net_kill_list, cleanup_list) {
+ 		unhash_nsid(net, last);
+ 		list_add_tail(&net->exit_list, &net_exit_list);
++		/* Dovetail: drop the oob-specific state. */
++		net_cleanup_oob_state(&net->oob);
+ 	}
+ 
+ 	/* Run all of the network namespace pre_exit methods */
+-- 
+2.43.0
+

@@ -1,0 +1,37 @@
+From 94aad4fbb18f6aee91fdb24db214775ddb4fe5c5 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 19 Nov 2024 09:21:05 +0100
+Subject: [PATCH 164/175] clocksource/cadence-ttc: irq_pipeline: enable
+ pipelined clock events
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/clocksource/timer-cadence-ttc.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clocksource/timer-cadence-ttc.c b/drivers/clocksource/timer-cadence-ttc.c
+index 32daaac9b132..5358e6569138 100644
+--- a/drivers/clocksource/timer-cadence-ttc.c
++++ b/drivers/clocksource/timer-cadence-ttc.c
+@@ -144,7 +144,7 @@ static irqreturn_t ttc_clock_event_interrupt(int irq, void *dev_id)
+ 	/* Acknowledge the interrupt and call event handler */
+ 	readl_relaxed(timer->base_addr + TTC_ISR_OFFSET);
+ 
+-	ttce->ce.event_handler(&ttce->ce);
++	clockevents_handle_event(&ttce->ce);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -432,7 +432,8 @@ static int __init ttc_setup_clockevent(struct clk *clk,
+ 
+ 	ttcce->ttc.base_addr = base;
+ 	ttcce->ce.name = "ttc_clockevent";
+-	ttcce->ce.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT;
++	ttcce->ce.features = CLOCK_EVT_FEAT_PERIODIC | \
++		CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_PIPELINE;
+ 	ttcce->ce.set_next_event = ttc_set_next_event;
+ 	ttcce->ce.set_state_shutdown = ttc_shutdown;
+ 	ttcce->ce.set_state_periodic = ttc_set_periodic;
+-- 
+2.43.0
+

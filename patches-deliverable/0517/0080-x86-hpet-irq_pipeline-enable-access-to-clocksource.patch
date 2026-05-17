@@ -1,0 +1,45 @@
+From 6f265b4a7d307d75340b45db946e1aebc2d8fecd Mon Sep 17 00:00:00 2001
+From: Jan Kiszka <jan.kiszka@siemens.com>
+Date: Fri, 18 Jun 2021 08:29:53 +0200
+Subject: [PATCH 080/175] x86/hpet: irq_pipeline: enable access to clocksource
+
+While it's slow, has scalability issues, it remains the second-best
+clocksource for Linux on x86. If Linux decides that the TSC is not
+reliable we will end up here and should avoid bringing the system into
+an unstable state.
+
+Suggested-by: Philippe Gerum <rpm@xenomai.org>
+Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+---
+ arch/x86/kernel/hpet.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kernel/hpet.c b/arch/x86/kernel/hpet.c
+index 098817134e45..1572b1a0634a 100644
+--- a/arch/x86/kernel/hpet.c
++++ b/arch/x86/kernel/hpet.c
+@@ -814,7 +814,7 @@ static u64 read_hpet(struct clocksource *cs)
+ 	if (arch_spin_is_locked(&old.lock))
+ 		goto contended;
+ 
+-	local_irq_save(flags);
++	flags = hard_local_irq_save();
+ 	if (arch_spin_trylock(&hpet.lock)) {
+ 		new.value = hpet_readl(HPET_COUNTER);
+ 		/*
+@@ -822,10 +822,10 @@ static u64 read_hpet(struct clocksource *cs)
+ 		 */
+ 		WRITE_ONCE(hpet.value, new.value);
+ 		arch_spin_unlock(&hpet.lock);
+-		local_irq_restore(flags);
++		hard_local_irq_restore(flags);
+ 		return (u64)new.value;
+ 	}
+-	local_irq_restore(flags);
++	hard_local_irq_restore(flags);
+ 
+ contended:
+ 	/*
+-- 
+2.43.0
+

@@ -1,0 +1,51 @@
+From a41a0f45c1a400e8045a0c9c411cc8cc24ea84e4 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Tue, 12 Mar 2024 10:02:57 +0100
+Subject: [PATCH 120/175] x86: irq_pipeline: add missing __noreturn annotation
+
+Fixes the following warning at link:
+
+vmlinux.o: warning: objtool: arch_do_IRQ_pipelined+0x53f: __sysvec_reboot() is missing a __noreturn annotation
+
+Reported-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/include/asm/idtentry.h | 8 ++++++++
+ arch/x86/kernel/smp.c           | 2 +-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
+index 7646910616cc..6cbde1f09b07 100644
+--- a/arch/x86/include/asm/idtentry.h
++++ b/arch/x86/include/asm/idtentry.h
+@@ -224,6 +224,14 @@ __visible noinstr void func(struct pt_regs *regs)			\
+ 									\
+ __visible void __##func(struct pt_regs *regs)
+ 
++#define DEFINE_IDTENTRY_SYSVEC_PIPELINED_NORETURN(vector, func)		\
++__visible noinstr void func(struct pt_regs *regs)			\
++{									\
++	arch_pipeline_entry(regs, vector);				\
++}									\
++									\
++__visible __noreturn void __##func(struct pt_regs *regs)
++
+ #define DEFINE_IDTENTRY_SYSVEC_SIMPLE_PIPELINED(vector, func)		\
+ 	DEFINE_IDTENTRY_SYSVEC_PIPELINED(vector, func)
+ 
+diff --git a/arch/x86/kernel/smp.c b/arch/x86/kernel/smp.c
+index 72db5f349dae..a9336e729451 100644
+--- a/arch/x86/kernel/smp.c
++++ b/arch/x86/kernel/smp.c
+@@ -133,7 +133,7 @@ static int smp_stop_nmi_callback(unsigned int val, struct pt_regs *regs)
+ /*
+  * this function calls the 'stop' function on all other CPUs in the system.
+  */
+-DEFINE_IDTENTRY_SYSVEC_PIPELINED(REBOOT_VECTOR, sysvec_reboot)
++DEFINE_IDTENTRY_SYSVEC_PIPELINED_NORETURN(REBOOT_VECTOR, sysvec_reboot)
+ {
+ 	apic_eoi();
+ 	cpu_emergency_disable_virtualization();
+-- 
+2.43.0
+

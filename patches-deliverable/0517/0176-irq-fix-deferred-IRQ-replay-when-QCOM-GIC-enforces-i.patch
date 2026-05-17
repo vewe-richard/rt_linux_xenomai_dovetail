@@ -1,0 +1,109 @@
+From e48681ab608355317ce1527d2cc2812285d5caf5 Mon Sep 17 00:00:00 2001
+From: vewe-richard <jiang.j.qian@qq.com>
+Date: Sun, 17 May 2026 08:57:00 +0800
+Subject: [PATCH] irq: fix deferred IRQ replay when QCOM GIC enforces irqctx
+
+QCOM GICv2/v3 sets irqd_set_handle_enforce_irqctx() on all IRQs,
+which makes handle_irq_desc() return -EPERM for any IRQ not seen
+as hardirq. During deferred in-band IRQ replay, is_hardirq()
+returned false because IRQS_DEFERRED was still set and in_pipeline()
+was false, even though irq_enter() had been called. This silently
+dropped all deferred percpu IRQs (including arch_timer PPI).
+
+Three fixes:
+
+1. irqdesc.c: is_hardirq() - also check in_hardirq() when pipelined,
+   since arch_do_IRQ_pipelined() calls irq_enter() before
+
+2. chip.c: get_flow_step() - use hard_irqs_disabled() to distinguish
+   hardware IRQ entry (PILEUP) from in-band sync replay (REPLAY)
+
+3. chip.c: handle_percpu_devid_irq() - use should_feed_pipeline()
+   instead of may_start_flow() to clear IRQS_DEFERRED on REPLAY,
+   matching what other flow handlers already do
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/arm64/include/dovetail/irq.h         |  1 +
+ arch/arm64/include/dovetail/thread_info.h |  1 +
+ kernel/irq/chip.c                         | 16 ++++++++++++++--
+ kernel/irq/irqdesc.c                      | 11 +++++++++++
+ 4 files changed, 27 insertions(+), 2 deletions(-)
+ create mode 120000 arch/arm64/include/dovetail/irq.h
+ create mode 120000 arch/arm64/include/dovetail/thread_info.h
+
+diff --git a/arch/arm64/include/dovetail/irq.h b/arch/arm64/include/dovetail/irq.h
+new file mode 120000
+index 000000000000..15893e533068
+--- /dev/null
++++ b/arch/arm64/include/dovetail/irq.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/include/dovetail/irq.h
+\ No newline at end of file
+diff --git a/arch/arm64/include/dovetail/thread_info.h b/arch/arm64/include/dovetail/thread_info.h
+new file mode 120000
+index 000000000000..28eb1f463fdc
+--- /dev/null
++++ b/arch/arm64/include/dovetail/thread_info.h
+@@ -0,0 +1 @@
++/home/richard/work/2026/xenomai/xenomai/kernel/cobalt/include/dovetail/thread_info.h
+\ No newline at end of file
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index 2fe9aa5f8400..47cf7510d5bb 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -628,7 +628,19 @@ static inline unsigned int get_flow_step(struct irq_desc *desc)
+ 		return desc->istate & IRQS_FORWARDED ?
+ 			IRQ_FLOW_FORWARD : IRQ_FLOW_START;
+ 
+-	return in_pipeline() ? IRQ_FLOW_PILEUP : IRQ_FLOW_REPLAY;
++	/*
++	 * Normally in_pipeline() returning true means we are in the
++	 * hardware IRQ entry path and a new event piled up on a
++	 * deferred one. However, during in-band sync replay via
++	 * sync_current_irq_stage() -> do_inband_irq(), hardirqs are
++	 * enabled (hard_local_irq_enable() is called first), whereas
++	 * a true hardware IRQ entry has them disabled. Use this to
++	 * correctly distinguish PILEUP from REPLAY.
++	 */
++	if (in_pipeline() && hard_irqs_disabled())
++		return IRQ_FLOW_PILEUP;
++
++	return IRQ_FLOW_REPLAY;
+ }
+ 
+ /*
+@@ -1254,7 +1266,7 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
+ 
+ 	flow = get_flow_step(desc);
+ 	if (irqs_pipelined()) {
+-		if (may_start_flow(flow)) {
++		if (should_feed_pipeline(desc, flow)) {
+ 			if (chip->irq_ack)
+ 				chip->irq_ack(&desc->irq_data);
+ 			handled = handle_oob_irq(desc);
+diff --git a/kernel/irq/irqdesc.c b/kernel/irq/irqdesc.c
+index 285f1246d0c7..07489ac0f440 100644
+--- a/kernel/irq/irqdesc.c
++++ b/kernel/irq/irqdesc.c
+@@ -671,6 +671,17 @@ static inline bool is_hardirq(struct irq_desc *desc)
+ 	if (in_pipeline() || !(desc->istate & IRQS_DEFERRED))
+ 		return true;
+ 
++	/*
++	 * During in-band sync replay via sync_current_irq_stage(),
++	 * we are not in pipeline context but irq_enter() was called
++	 * by arch_do_IRQ_pipelined(), so in_hardirq() is true even
++	 * though IRQS_DEFERRED is still set (it gets cleared later
++	 * in the flow handler).  Without this check, handle_irq_desc()
++	 * returns -EPERM and the deferred IRQ is silently dropped.
++	 */
++	if (in_hardirq())
++		return true;
++
+ 	return false;
+ }
+ 
+-- 
+2.43.0
+

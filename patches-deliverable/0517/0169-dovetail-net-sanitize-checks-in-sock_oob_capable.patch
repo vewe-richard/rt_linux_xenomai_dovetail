@@ -1,0 +1,32 @@
+From 0a1807e03d2e82b6dbf52360dd514e065c30d287 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Thu, 2 Jan 2025 18:44:54 +0100
+Subject: [PATCH 169/175] dovetail: net: sanitize checks in sock_oob_capable()
+
+Given a socket which should refer to a valid struct sock, use the
+information in the latter exclusively to figure out whether the tested
+socket is oob-capable, i.e. the presence of a valid pointer to an oob
+extension. IOW, do not rely on the same information which might be
+available from another place such as sock->file.
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ include/net/sock.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 949a59fdbf79..315d6929b893 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1923,7 +1923,7 @@ void sock_pfree(struct sk_buff *skb);
+ 
+ static inline bool sock_oob_capable(struct socket *sock)
+ {
+-	return sock && sock->sk && sock->file && sock->file->oob_data;
++	return sock && sock->sk && sock->sk->oob_data;
+ }
+ 
+ int sock_oob_bind(struct sock *sk,
+-- 
+2.43.0
+

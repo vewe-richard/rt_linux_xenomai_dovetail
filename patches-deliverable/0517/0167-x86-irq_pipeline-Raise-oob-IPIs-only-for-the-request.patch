@@ -1,0 +1,59 @@
+From 9806be5d708a97276d11ecae6be8e7d15fc0a9cc Mon Sep 17 00:00:00 2001
+From: Florian Bezdeka <florian.bezdeka@siemens.com>
+Date: Thu, 28 Nov 2024 14:04:07 +0100
+Subject: [PATCH 167/175] x86: irq_pipeline: Raise oob IPIs only for the
+ requested cpumask
+
+irq_send_oob_ipi() silently migrates from the supplied cpumask to
+allbutself, which is a overkill - especially for the OOB resched
+vector.
+
+Seen in a real world trace - cpumask=6 requested but each CPU got one:
+
+       SCTSeqRun-17771 [000]  5888.449485: ipi_send_cpumask:     cpumask=6 callsite=run_oob_call+0x91 callback=0x0
+       SCTSeqRun-17771 [000]  5888.449487: write_msr:            830, value c00ea
+   OMP-TT-P19511-22125 [021]  5888.449489: irq_pipeline_entry:   irq=524545
+ PARC92.rawobjpr-19511 [019]  5888.449489: irq_pipeline_entry:   irq=524545
+       SCTSeqRun-17771 [000]  5888.449489: cobalt_head_sysexit:  result=0
+              ps-23075 [018]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22138 [004]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22129 [024]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22131 [013]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22147 [011]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22128 [010]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22137 [003]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22144 [001]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22145 [005]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22140 [015]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22136 [014]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22134 [007]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22121 [012]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22127 [009]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22130 [025]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22149 [008]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22148 [002]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22122 [028]  5888.449489: irq_pipeline_entry:   irq=524545
+   OMP-TT-P19511-22126 [027]  5888.449489: irq_pipeline_entry:   irq=524545
+   ...
+
+Signed-off-by: Florian Bezdeka <florian.bezdeka@siemens.com>
+---
+ arch/x86/kernel/smp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/smp.c b/arch/x86/kernel/smp.c
+index a9336e729451..f5d1113c0155 100644
+--- a/arch/x86/kernel/smp.c
++++ b/arch/x86/kernel/smp.c
+@@ -276,7 +276,7 @@ DEFINE_IDTENTRY_SYSVEC_PIPELINED(CALL_FUNCTION_SINGLE_VECTOR,
+ void irq_send_oob_ipi(unsigned int ipi,
+ 		const struct cpumask *cpumask)
+ {
+-	apic_send_IPI_allbutself(apicm_irq_vector(ipi));
++	__apic_send_IPI_mask(cpumask, apicm_irq_vector(ipi));
+ }
+ EXPORT_SYMBOL_GPL(irq_send_oob_ipi);
+ 
+-- 
+2.43.0
+

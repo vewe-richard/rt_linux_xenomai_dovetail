@@ -1,0 +1,240 @@
+From 791d2c60b2783e96202ed155bfd47c840a31f283 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Mon, 6 May 2019 18:37:41 +0200
+Subject: [PATCH 083/175] x86: dovetail: route syscalls
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ arch/x86/entry/common.c            | 32 +++++++++++++++++++
+ arch/x86/include/asm/syscall.h     |  5 +++
+ arch/x86/include/asm/thread_info.h |  2 ++
+ include/linux/entry-common.h       |  8 +++++
+ kernel/entry/common.c              | 50 +++++++++++++++++++++++++++++-
+ 5 files changed, 96 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index e72dac092245..0296f19a6c17 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -76,6 +76,15 @@ __visible noinstr void do_syscall_64(struct pt_regs *regs, int nr)
+ 	add_random_kstack_offset();
+ 	nr = syscall_enter_from_user_mode(regs, nr);
+ 
++	if (dovetailing()) {
++		if (nr == EXIT_SYSCALL_OOB) {
++			hard_local_irq_disable();
++			return;
++		}
++		if (nr == EXIT_SYSCALL_TAIL)
++			goto done;
++	}
++
+ 	instrumentation_begin();
+ 
+ 	if (!do_syscall_x64(regs, nr) && !do_syscall_x32(regs, nr) && nr != -1) {
+@@ -84,6 +93,7 @@ __visible noinstr void do_syscall_64(struct pt_regs *regs, int nr)
+ 	}
+ 
+ 	instrumentation_end();
++done:
+ 	syscall_exit_to_user_mode(regs);
+ }
+ #endif
+@@ -221,11 +231,22 @@ __visible noinstr void do_int80_syscall_32(struct pt_regs *regs)
+ 	 * the semantics of syscall_get_nr().
+ 	 */
+ 	nr = syscall_enter_from_user_mode(regs, nr);
++
++	if (dovetailing()) {
++		if (nr == EXIT_SYSCALL_OOB) {
++			hard_local_irq_disable();
++			return;
++		}
++		if (nr == EXIT_SYSCALL_TAIL)
++			goto done;
++	}
++
+ 	instrumentation_begin();
+ 
+ 	do_syscall_32_irqs_on(regs, nr);
+ 
+ 	instrumentation_end();
++done:
+ 	syscall_exit_to_user_mode(regs);
+ }
+ #endif /* !CONFIG_IA32_EMULATION */
+@@ -269,9 +290,20 @@ static noinstr bool __do_fast_syscall_32(struct pt_regs *regs)
+ 
+ 	nr = syscall_enter_from_user_mode_work(regs, nr);
+ 
++	if (dovetailing()) {
++		if (nr == EXIT_SYSCALL_OOB) {
++			instrumentation_end();
++			hard_local_irq_disable();
++			return true;
++		}
++		if (nr == EXIT_SYSCALL_TAIL)
++			goto done;
++	}
++
+ 	/* Now this is just like a normal syscall. */
+ 	do_syscall_32_irqs_on(regs, nr);
+ 
++done:
+ 	instrumentation_end();
+ 	syscall_exit_to_user_mode(regs);
+ 	return true;
+diff --git a/arch/x86/include/asm/syscall.h b/arch/x86/include/asm/syscall.h
+index 228a42585d5c..1d978828ef3e 100644
+--- a/arch/x86/include/asm/syscall.h
++++ b/arch/x86/include/asm/syscall.h
+@@ -121,6 +121,11 @@ static inline void syscall_get_arguments(struct task_struct *task,
+ 	}
+ }
+ 
++static inline unsigned long syscall_get_arg0(struct pt_regs *regs)
++{
++	return regs->di;
++}
++
+ static inline int syscall_get_arch(struct task_struct *task)
+ {
+ 	/* x32 tasks should be considered AUDIT_ARCH_X86_64. */
+diff --git a/arch/x86/include/asm/thread_info.h b/arch/x86/include/asm/thread_info.h
+index 51d7f2d515a5..75723c1e5886 100644
+--- a/arch/x86/include/asm/thread_info.h
++++ b/arch/x86/include/asm/thread_info.h
+@@ -96,6 +96,7 @@ struct thread_info {
+ #define TIF_NOCPUID		15	/* CPUID is not accessible in userland */
+ #define TIF_NOTSC		16	/* TSC is not accessible in userland */
+ #define TIF_NOTIFY_SIGNAL	17	/* signal notifications exist */
++#define TIF_RETUSER		19	/* INBAND_TASK_RETUSER is pending */
+ #define TIF_MEMDIE		20	/* is terminating due to OOM killer */
+ #define TIF_POLLING_NRFLAG	21	/* idle is polling for TIF_NEED_RESCHED */
+ #define TIF_IO_BITMAP		22	/* uses I/O bitmap */
+@@ -120,6 +121,7 @@ struct thread_info {
+ #define _TIF_NOCPUID		(1 << TIF_NOCPUID)
+ #define _TIF_NOTSC		(1 << TIF_NOTSC)
+ #define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
++#define _TIF_RETUSER		(1 << TIF_RETUSER)
+ #define _TIF_POLLING_NRFLAG	(1 << TIF_POLLING_NRFLAG)
+ #define _TIF_IO_BITMAP		(1 << TIF_IO_BITMAP)
+ #define _TIF_SPEC_FORCE_UPDATE	(1 << TIF_SPEC_FORCE_UPDATE)
+diff --git a/include/linux/entry-common.h b/include/linux/entry-common.h
+index f7dc605f0df7..eaa309d92bfa 100644
+--- a/include/linux/entry-common.h
++++ b/include/linux/entry-common.h
+@@ -62,6 +62,14 @@
+ 	 _TIF_NEED_RESCHED | _TIF_PATCH_PENDING | _TIF_NOTIFY_SIGNAL |	\
+ 	 ARCH_EXIT_TO_USER_MODE_WORK)
+ 
++/*
++ * Status codes of syscall entry when Dovetail is enabled. Must not
++ * conflict with valid syscall numbers. And with -1 which seccomp uses
++ * to skip an syscall.
++ */
++#define EXIT_SYSCALL_OOB	(-2)
++#define EXIT_SYSCALL_TAIL	(-3)
++
+ /**
+  * arch_enter_from_user_mode - Architecture specific sanity check for user mode regs
+  * @regs:	Pointer to currents pt_regs
+diff --git a/kernel/entry/common.c b/kernel/entry/common.c
+index f15d698a3ff9..e1ec8c567e72 100644
+--- a/kernel/entry/common.c
++++ b/kernel/entry/common.c
+@@ -120,6 +120,17 @@ static __always_inline long
+ __syscall_enter_from_user_work(struct pt_regs *regs, long syscall)
+ {
+ 	unsigned long work = READ_ONCE(current_thread_info()->syscall_work);
++	int ret;
++
++	/*
++	 * Pipeline the syscall to the companion core if the current
++	 * task wants this. Compiled out if not dovetailing.
++	 */
++	ret = pipeline_syscall(syscall, regs);
++	if (ret > 0)	/* out-of-band, bail out. */
++		return EXIT_SYSCALL_OOB;
++	if (ret < 0)		/* in-band, tail work only. */
++		return EXIT_SYSCALL_TAIL;
+ 
+ 	if (work & SYSCALL_WORK_ENTER)
+ 		syscall = syscall_trace_enter(regs, syscall, work);
+@@ -230,6 +241,19 @@ static unsigned long exit_to_user_mode_loop(struct pt_regs *regs,
+ 	return ti_work;
+ }
+ 
++static inline bool do_retuser(unsigned long ti_work)
++{
++	if (dovetailing() && (ti_work & _TIF_RETUSER)) {
++		hard_local_irq_enable();
++		inband_retuser_notify();
++		hard_local_irq_disable();
++		/* RETUSER might have switched oob */
++		return running_inband();
++	}
++
++	return false;
++}
++
+ static void exit_to_user_mode_prepare(struct pt_regs *regs)
+ {
+ 	unsigned long ti_work;
+@@ -237,6 +261,8 @@ static void exit_to_user_mode_prepare(struct pt_regs *regs)
+ 	check_hard_irqs_disabled();
+ 
+ 	lockdep_assert_irqs_disabled();
++again:
++	ti_work = read_thread_flags();
+ 
+ 	/* Flush pending rcuog wakeup before the last need_resched() check */
+ 	tick_nohz_user_enter_prepare();
+@@ -247,6 +273,10 @@ static void exit_to_user_mode_prepare(struct pt_regs *regs)
+ 
+ 	arch_exit_to_user_mode_prepare(regs, ti_work);
+ 
++	/* Dovetail: Fire pending RETUSER request. */
++	if (do_retuser(ti_work))
++		goto again;
++
+ 	/* Ensure that kernel state is sane for a return to userspace */
+ 	kmap_assert_nomap();
+ 	lockdep_assert_irqs_disabled();
+@@ -293,6 +323,24 @@ static void syscall_exit_work(struct pt_regs *regs, unsigned long work)
+ 		ptrace_report_syscall_exit(regs, step);
+ }
+ 
++static inline bool syscall_has_exit_work(struct pt_regs *regs,
++					unsigned long work)
++{
++	/*
++	 * Dovetail: if this does not look like an in-band syscall, it
++	 * has to belong to the companion core. Typically,
++	 * __OOB_SYSCALL_BIT would be set in this value. Skip the
++	 * work for those syscalls.
++	 */
++	if (unlikely(work & SYSCALL_WORK_EXIT)) {
++		if (!irqs_pipelined())
++			return true;
++		return syscall_get_nr(current, regs) < NR_syscalls;
++	}
++
++	return false;
++}
++
+ /*
+  * Syscall specific exit to user mode preparation. Runs with interrupts
+  * enabled.
+@@ -316,7 +364,7 @@ static void syscall_exit_to_user_mode_prepare(struct pt_regs *regs)
+ 	 * enabled, we want to run them exactly once per syscall exit with
+ 	 * interrupts enabled.
+ 	 */
+-	if (unlikely(work & SYSCALL_WORK_EXIT))
++	if (syscall_has_exit_work(regs, work))
+ 		syscall_exit_work(regs, work);
+ }
+ 
+-- 
+2.43.0
+

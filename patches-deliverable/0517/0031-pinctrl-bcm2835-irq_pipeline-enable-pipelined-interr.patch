@@ -1,0 +1,36 @@
+From d2dd63a215848bb9e3dad2da99d9a09a5a401c21 Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Fri, 25 Aug 2017 16:25:14 +0200
+Subject: [PATCH 031/175] pinctrl/bcm2835: irq_pipeline: enable pipelined
+ interrupt control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/pinctrl/bcm/pinctrl-bcm2835.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pinctrl/bcm/pinctrl-bcm2835.c b/drivers/pinctrl/bcm/pinctrl-bcm2835.c
+index 9521904cadae..f4ab19952019 100644
+--- a/drivers/pinctrl/bcm/pinctrl-bcm2835.c
++++ b/drivers/pinctrl/bcm/pinctrl-bcm2835.c
+@@ -89,7 +89,7 @@ struct bcm2835_pinctrl {
+ 	struct pinctrl_desc pctl_desc;
+ 	struct pinctrl_gpio_range gpio_range;
+ 
+-	raw_spinlock_t irq_lock[BCM2835_NUM_BANKS];
++	hard_spinlock_t irq_lock[BCM2835_NUM_BANKS];
+ 	/* Protect FSEL registers */
+ 	spinlock_t fsel_lock;
+ };
+@@ -710,7 +710,7 @@ static const struct irq_chip bcm2835_gpio_irq_chip = {
+ 	.irq_mask = bcm2835_gpio_irq_mask,
+ 	.irq_unmask = bcm2835_gpio_irq_unmask,
+ 	.irq_set_wake = bcm2835_gpio_irq_set_wake,
+-	.flags = (IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_IMMUTABLE),
++	.flags = (IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_IMMUTABLE | IRQCHIP_PIPELINE_SAFE),
+ 	GPIOCHIP_IRQ_RESOURCE_HELPERS,
+ };
+ 
+-- 
+2.43.0
+

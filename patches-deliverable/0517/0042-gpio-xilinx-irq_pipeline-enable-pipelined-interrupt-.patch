@@ -1,0 +1,27 @@
+From 60ef3fa37ce6a701fb2d26dedd0aba9509ee4b2f Mon Sep 17 00:00:00 2001
+From: Philippe Gerum <rpm@xenomai.org>
+Date: Sat, 16 May 2020 11:46:28 +0200
+Subject: [PATCH 042/175] gpio: xilinx: irq_pipeline: enable pipelined
+ interrupt control
+
+Signed-off-by: Philippe Gerum <rpm@xenomai.org>
+---
+ drivers/gpio/gpio-xilinx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpio/gpio-xilinx.c b/drivers/gpio/gpio-xilinx.c
+index 956ea2957833..356541268676 100644
+--- a/drivers/gpio/gpio-xilinx.c
++++ b/drivers/gpio/gpio-xilinx.c
+@@ -66,7 +66,7 @@ struct xgpio_instance {
+ 	DECLARE_BITMAP(state, 64);
+ 	DECLARE_BITMAP(last_irq_read, 64);
+ 	DECLARE_BITMAP(dir, 64);
+-	raw_spinlock_t gpio_lock;	/* For serializing operations */
++	hard_spinlock_t gpio_lock;	/* For serializing operations */
+ 	int irq;
+ 	DECLARE_BITMAP(enable, 64);
+ 	DECLARE_BITMAP(rising_edge, 64);
+-- 
+2.43.0
+
